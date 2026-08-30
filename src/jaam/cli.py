@@ -121,8 +121,13 @@ def main(argv: list[str] | None = None) -> int:
         "durationSeconds": run_result.solver_duration_s,
         "minimumS11Db": run_result.minimum_s11_db,
         "bestFrequencyHz": run_result.best_frequency_hz,
+        "peakGainDb": run_result.peak_gain_db,
     }
     manifest["outputs"]["ports"] = [path.name for path in run_result.csv_files]
+    if run_result.nf2ff_csv:
+        manifest["outputs"]["nf2ff"] = run_result.nf2ff_csv.name
+    if run_result.farfield_vtp:
+        manifest["outputs"]["farfield"] = run_result.farfield_vtp.name
     write_manifest(output_dir, manifest)
     print(f"run {manifest['runId']}: {manifest['createdAt']}")
     for index, (path, minimum) in enumerate(zip(run_result.csv_files, run_result.minimum_s11_db), 1):

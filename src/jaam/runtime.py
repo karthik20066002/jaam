@@ -9,6 +9,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from .farfield import write_farfield_vtp, write_nf2ff_csv
 from .ir import BoxOp, CurveOp, RotPolyOp, SimulationIR, WireOp
 
 
@@ -22,6 +23,9 @@ class RunResult:
     minimum_s11_db: tuple[float, ...]
     best_frequency_hz: tuple[float, ...] = ()
     solver_duration_s: float = 0.0
+    nf2ff_csv: Path | None = None
+    farfield_vtp: Path | None = None
+    peak_gain_db: float | None = None
 
 
 def _native_modules():
@@ -105,6 +109,7 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
             "multiple independently excited ports require separate simulations; "
             "this runtime currently supports exactly one feed"
         )
+    nf2ff = fdtd.CreateNF2FFBox()
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "solver.log.jsonl"
 
@@ -153,5 +158,43 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
         csv_files.append(path)
         minima.append(float(np.min(db)))
         best_frequencies.append(float(frequencies[int(np.argmin(db))]))
-    log("solver-complete", durationSeconds=solver_duration, bestFrequencyHz=best_frequencies[0])
-    return RunResult(tuple(csv_files), tuple(minima), tuple(best_frequencies), solver_duration)
+    theta_deg = np.linspace(0.0, 180.0, 181)
+    phi_deg = np.linspace(0.0, 360.0, 361)
+    best_frequency = best_frequencies[0]
+    farfield = nf2ff.CalcNF2FF(
+        str(output_dir),
+        best_frequency,
+        np.deg2rad(theta_deg),
+        np.deg2rad(phi_deg),
+        read_cached=False,
+    )
+    magnitude = np.squeeze(np.asarray(farfield.E_norm, dtype=float))
+    expected = (len(theta_deg), len(phi_deg))
+    if magnitude.shape == expected[::-1]:
+        magnitude = magnitude.T
+    if magnitude.shape != expected:
+        raise RuntimeError(f"unexpected NF2FF matrix shape {magnitude.shape}; expected {expected}")
+    normalized_db = 20 * np.log10(np.maximum(magnitude / np.max(magnitude), 1e-300))
+    directivity = float(np.ravel(np.asarray(farfield.Dmax))[0])
+    peak_gain_db = 10 * math.log10(max(directivity, 1e-300))
+    gain_db = normalized_db + peak_gain_db
+    nf2ff_csv = output_dir / "nf2ff.csv"
+    farfield_vtp = output_dir / "farfield.vtp"
+    gain_rows = tuple(tuple(float(value) for value in row) for row in gain_db)
+    write_nf2ff_csv(nf2ff_csv, best_frequency, theta_deg, phi_deg, gain_rows)
+    write_farfield_vtp(farfield_vtp, theta_deg, phi_deg, gain_rows)
+    log(
+        "solver-complete",
+        durationSeconds=solver_duration,
+        bestFrequencyHz=best_frequency,
+        peakGainDb=peak_gain_db,
+    )
+    return RunResult(
+        tuple(csv_files),
+        tuple(minima),
+        tuple(best_frequencies),
+        solver_duration,
+        nf2ff_csv,
+        farfield_vtp,
+        peak_gain_db,
+    )

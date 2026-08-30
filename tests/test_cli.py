@@ -41,7 +41,11 @@ def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
     def fake_run(ir, output_dir):
         csv_path = output_dir / "port1_s11.csv"
         csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
-        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+        nf2ff = output_dir / "nf2ff.csv"
+        farfield = output_dir / "farfield.vtp"
+        nf2ff.write_text("frequency_hz,theta_deg,phi_deg,gain_db\n")
+        farfield.write_text("<VTKFile/>")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25, nf2ff, farfield, 2.1)
 
     monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
     assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path)]) == 0
@@ -51,4 +55,6 @@ def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
     manifests = [json.loads((run / "manifest.json").read_text()) for run in runs]
     assert all(item["status"] == "complete" for item in manifests)
     assert manifests[0]["runId"] != manifests[1]["runId"]
+    assert all(item["outputs"]["farfield"] == "farfield.vtp" for item in manifests)
+    assert all(item["solver"]["peakGainDb"] == 2.1 for item in manifests)
     assert "run " in capsys.readouterr().out
