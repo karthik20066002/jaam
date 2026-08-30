@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from jaam.cli import main
 
@@ -20,3 +21,16 @@ def test_json_diagnostics(capsys, tmp_path):
     assert main(["check", str(source), "--format", "json"]) == 1
     assert '"code"' in capsys.readouterr().err
 
+
+def test_inspect_command_human(capsys):
+    assert main(["inspect", "examples/yagi.jaam"]) == 0
+    output = capsys.readouterr().out
+    assert "compiler passes:" in output
+    assert "domain-and-mesh-construction" in output
+
+
+def test_inspect_command_json(capsys):
+    assert main(["inspect", "examples/yagi.jaam", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schemaVersion"] == 1
+    assert payload["ir"]["geometry"]

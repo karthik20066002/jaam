@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
-from .compiler import compile_file
+from .compiler import CompilationResult, compile_file_result
 from .diagnostics import CompilationError, render_diagnostics
 from .emitter import emit_python
 from .ir import CurveOp, SimulationIR, WireOp
 from .runtime import NativeDependencyError, run_simulation
+from .serialization import compilation_to_dict
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jaam", description="Just Another Antenna Modeller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("check", "compile", "run"):
+    for name in ("check", "compile", "inspect", "run"):
         command = subparsers.add_parser(name)
         command.add_argument("source", type=Path)
         command.add_argument("--format", choices=("human", "json"), default="human")
@@ -23,6 +25,15 @@ def _parser() -> argparse.ArgumentParser:
         if name == "run":
             command.add_argument("--output-dir", type=Path)
     return parser
+
+
+def _inspection(result: CompilationResult) -> str:
+    lines = [_summary(result.ir), "", "compiler passes:"]
+    for item in result.passes:
+        statistics = ", ".join(f"{key}={value}" for key, value in item.statistics.items())
+        lines.append(f"  {item.name}: {item.duration_ns / 1_000_000:.3f} ms ({statistics})")
+    lines.append(f"total: {result.duration_ns / 1_000_000:.3f} ms")
+    return "\n".join(lines)
 
 
 def _summary(ir: SimulationIR) -> str:
@@ -41,7 +52,8 @@ def _summary(ir: SimulationIR) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        ir = compile_file(args.source)
+        result = compile_file_result(args.source)
+        ir = result.ir
     except OSError as exc:
         print(f"jaam: {exc}", file=sys.stderr)
         return 2
@@ -49,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         render_diagnostics(exc.diagnostics, fmt=args.format)
         return 1
 
+    if args.command == "inspect":
+        if args.format == "json":
+            print(json.dumps(compilation_to_dict(result), indent=2, sort_keys=True))
+        else:
+            print(_inspection(result))
+        return 0
     if args.format == "human":
         print(_summary(ir))
         for warning in ir.warnings:
@@ -79,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
