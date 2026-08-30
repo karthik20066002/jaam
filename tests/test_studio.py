@@ -24,3 +24,12 @@ def test_studio_cli_delegates_to_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr("jaam.studio.launch", lambda path: seen.append(path))
     assert main(["studio", str(source)]) == 0
     assert seen == [source]
+
+
+def test_solver_log_polling_is_non_blocking():
+    state = StudioState.open(None)
+    state._log_queue.put("iteration 100")
+    state._log_queue.put("iteration 200")
+    assert state.poll_solver_log() == ("iteration 100", "iteration 200")
+    assert state.poll_solver_log() == ()
+    assert state.solver_log == ["iteration 100", "iteration 200"]

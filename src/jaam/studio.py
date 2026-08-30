@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Empty, Queue
 import subprocess
 import sys
+from threading import Thread
 from time import monotonic
 
 from .compiler import CompilationResult, compile_text_result
@@ -31,6 +33,9 @@ class StudioState:
     slice_coordinate: float = 0.0
     presentation_mode: bool = False
     process: subprocess.Popen | None = field(default=None, repr=False)
+    solver_log: list[str] = field(default_factory=list)
+    _log_queue: Queue[str] = field(default_factory=Queue, repr=False)
+    _reader: Thread | None = field(default=None, repr=False)
     last_edit: float = field(default_factory=monotonic)
 
     @classmethod
@@ -79,6 +84,25 @@ class StudioState:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        self.solver_log.clear()
+        self._reader = Thread(target=self._read_solver_output, daemon=True)
+        self._reader.start()
+
+    def _read_solver_output(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            return
+        for line in self.process.stdout:
+            self._log_queue.put(line.rstrip())
+
+    def poll_solver_log(self) -> tuple[str, ...]:
+        fresh = []
+        while True:
+            try:
+                fresh.append(self._log_queue.get_nowait())
+            except Empty:
+                break
+        self.solver_log.extend(fresh)
+        return tuple(fresh)
 
     def cancel_run(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -94,6 +118,7 @@ def launch(path: Path | None = None) -> None:
     state = StudioState.open(path)
 
     def gui() -> None:
+        state.poll_solver_log()
         imgui.dock_space_over_viewport()
         io = imgui.get_io()
         compile_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.b)
@@ -106,6 +131,14 @@ def launch(path: Path | None = None) -> None:
         if changed:
             state.source_text = text
             state.last_edit = monotonic()
+        imgui.end()
+
+        imgui.begin("Solver Log")
+        for line in state.solver_log:
+            imgui.text_unformatted(line)
+        if state.process is not None:
+            status = "running" if state.process.poll() is None else f"exited {state.process.returncode}"
+            imgui.text(f"Solver: {status}")
         imgui.end()
 
         imgui.begin("Build")
