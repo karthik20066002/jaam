@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 
+from .artifacts import create_run_artifact, write_manifest
 from .compiler import CompilationResult, compile_file_result
 from .diagnostics import CompilationError, render_diagnostics
 from .emitter import emit_python
@@ -81,16 +82,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.format == "human":
             print(f"wrote {output}")
         return 0
-    output_dir = args.output_dir or Path("jaam-out") / args.source.stem
+    artifact_root = args.output_dir or Path("jaam-out") / args.source.stem
+    output_dir, manifest = create_run_artifact(artifact_root, args.source, result)
     try:
-        result = run_simulation(ir, output_dir)
+        run_result = run_simulation(ir, output_dir)
     except NativeDependencyError as exc:
+        manifest.update(status="failed", error=str(exc))
+        write_manifest(output_dir, manifest)
         print(f"jaam: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
+        manifest.update(status="failed", error=str(exc))
+        write_manifest(output_dir, manifest)
         print(f"jaam: solver failed: {exc}", file=sys.stderr)
         return 3
-    for index, (path, minimum) in enumerate(zip(result.csv_files, result.minimum_s11_db), 1):
+    manifest["status"] = "complete"
+    manifest["solver"] = {
+        "durationSeconds": run_result.solver_duration_s,
+        "minimumS11Db": run_result.minimum_s11_db,
+        "bestFrequencyHz": run_result.best_frequency_hz,
+    }
+    manifest["outputs"]["ports"] = [path.name for path in run_result.csv_files]
+    write_manifest(output_dir, manifest)
+    print(f"run {manifest['runId']}: {manifest['createdAt']}")
+    for index, (path, minimum) in enumerate(zip(run_result.csv_files, run_result.minimum_s11_db), 1):
         print(f"port {index}: min S11 {minimum:.2f} dB; {path}")
     return 0
 

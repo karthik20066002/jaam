@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
 import math
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from .ir import BoxOp, CurveOp, RotPolyOp, SimulationIR, WireOp
@@ -17,6 +20,8 @@ class NativeDependencyError(RuntimeError):
 class RunResult:
     csv_files: tuple[Path, ...]
     minimum_s11_db: tuple[float, ...]
+    best_frequency_hz: tuple[float, ...] = ()
+    solver_duration_s: float = 0.0
 
 
 def _native_modules():
@@ -95,28 +100,58 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
     _, fdtd, ports = build_native(ir)
     if not ports:
         raise RuntimeError("S11 requires at least one feed port")
+    if len(ports) > 1:
+        raise RuntimeError(
+            "multiple independently excited ports require separate simulations; "
+            "this runtime currently supports exactly one feed"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
-    fdtd.Run(str(output_dir), cleanup=True)
+    log_path = output_dir / "solver.log.jsonl"
+
+    def log(event: str, **fields) -> None:
+        item = {"time": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, sort_keys=True) + "\n")
+
+    log("solver-start")
+    started = perf_counter()
+    try:
+        fdtd.Run(str(output_dir), cleanup=True)
+    except Exception as exc:
+        log("solver-failed", error=str(exc))
+        raise
+    solver_duration = perf_counter() - started
     if ir.frequency.single_hz:
         frequencies = np.asarray([ir.frequency.single_hz])
     else:
         frequencies = np.linspace(ir.frequency.lower_hz, ir.frequency.upper_hz, 401)
     csv_files: list[Path] = []
     minima: list[float] = []
+    best_frequencies: list[float] = []
+    feed = next(
+        op.feed
+        for op in ir.geometry
+        if isinstance(op, (CurveOp, WireOp)) and op.feed is not None
+    )
     for index, port in enumerate(ports, 1):
         port.CalcPort(str(output_dir), frequencies)
         s11 = port.uf_ref / port.uf_inc
         magnitude = np.abs(s11)
         db = 20 * np.log10(np.maximum(magnitude, 1e-300))
         vswr = np.where(magnitude < 1, (1 + magnitude) / (1 - magnitude), np.inf)
+        impedance = feed.impedance_ohm * (1 + s11) / (1 - s11)
         path = output_dir / f"port{index}_s11.csv"
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(("frequency_hz", "s11_real", "s11_imag", "s11_db", "vswr"))
+            writer.writerow(
+                ("frequency_hz", "s11_real", "s11_imag", "s11_db", "vswr", "resistance_ohm", "reactance_ohm")
+            )
             writer.writerows(
-                (float(f), float(s.real), float(s.imag), float(level), float(ratio))
-                for f, s, level, ratio in zip(frequencies, s11, db, vswr)
+                (float(f), float(s.real), float(s.imag), float(level), float(ratio), float(z.real), float(z.imag))
+                for f, s, level, ratio, z in zip(frequencies, s11, db, vswr, impedance)
             )
         csv_files.append(path)
         minima.append(float(np.min(db)))
-    return RunResult(tuple(csv_files), tuple(minima))
+        best_frequencies.append(float(frequencies[int(np.argmin(db))]))
+    log("solver-complete", durationSeconds=solver_duration, bestFrequencyHz=best_frequencies[0])
+    return RunResult(tuple(csv_files), tuple(minima), tuple(best_frequencies), solver_duration)

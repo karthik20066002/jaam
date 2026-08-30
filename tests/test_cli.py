@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 from jaam.cli import main
+from jaam.runtime import RunResult
 
 
 def test_check_command(capsys):
@@ -34,3 +35,20 @@ def test_inspect_command_json(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["schemaVersion"] == 1
     assert payload["ir"]["geometry"]
+
+
+def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
+    def fake_run(ir, output_dir):
+        csv_path = output_dir / "port1_s11.csv"
+        csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+
+    monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path)]) == 0
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path)]) == 0
+    runs = sorted(tmp_path.iterdir())
+    assert len(runs) == 2
+    manifests = [json.loads((run / "manifest.json").read_text()) for run in runs]
+    assert all(item["status"] == "complete" for item in manifests)
+    assert manifests[0]["runId"] != manifests[1]["runId"]
+    assert "run " in capsys.readouterr().out
