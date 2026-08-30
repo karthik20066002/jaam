@@ -18,6 +18,10 @@ dev = [
   "pytest>=8.3",
   "pytest-cov>=6.0",
 ]
+studio = [
+  "imgui-bundle>=1.6",
+  "pyvista>=0.45",
+]
 
 [project.scripts]
 jaam = "jaam.cli:main"
@@ -28,4 +32,3 @@ packages = ["src/jaam"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-
