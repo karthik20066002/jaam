@@ -27,6 +27,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--output-dir", type=Path)
     studio = subparsers.add_parser("studio")
     studio.add_argument("source", type=Path, nargs="?")
+    doctor = subparsers.add_parser("doctor")
+    doctor.add_argument("--finale", action="store_true", required=True)
     return parser
 
 
@@ -54,6 +56,13 @@ def _summary(ir: SimulationIR) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "doctor":
+        from .doctor import finale_checks
+
+        checks = finale_checks()
+        for check in checks:
+            print(f"{'ok' if check.ok else 'FAIL':4}  {check.name}: {check.detail}")
+        return 0 if all(check.ok for check in checks) else 1
     if args.command == "studio":
         try:
             from .studio import launch

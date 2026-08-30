@@ -1,0 +1,22 @@
+FROM ubuntu:24.04
+
+ARG OPENEMS_PROJECT_COMMIT=7706743cc33f5a105759eb5010053b8396631357
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates cmake cython3 git libboost-all-dev libcgal-dev \
+    libhdf5-dev libtinyxml-dev libvtk9-dev python3 python3-dev python3-numpy && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone --filter=blob:none https://github.com/thliebig/openEMS-Project.git /src/openEMS-Project && \
+    cd /src/openEMS-Project && \
+    git checkout "${OPENEMS_PROJECT_COMMIT}" && \
+    git submodule update --init --recursive && \
+    ./update_openEMS.sh --disable-GUI --python --skip-dep-check /opt/openEMS
+
+ENV PATH=/opt/openEMS/bin:${PATH}
+ENV PYTHONPATH=/opt/openEMS/lib/python3/dist-packages:/opt/openEMS/lib:${PYTHONPATH}
+LABEL org.jaam.openems-project-commit="${OPENEMS_PROJECT_COMMIT}"
+
+RUN python3 -c "import CSXCAD, openEMS; print('openEMS Python bindings ready')"
+WORKDIR /work

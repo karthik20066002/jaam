@@ -1,0 +1,13 @@
+frequency_lower 900MHz;
+frequency_upper 1100MHz;
+boundary free_space;
+
+default {
+    material: copper;
+    radius: 1mm;
+}
+
+wire dipole(
+    path: line(from: (0, 0, -71mm), to: (0, 0, 71mm)),
+    feed: port(impedance: 50ohm)
+);

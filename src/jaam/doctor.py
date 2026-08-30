@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import importlib.util
+from pathlib import Path
+import tempfile
+
+from .container import ContainerEngine, ContainerUnavailableError, SOLVER_IMAGE
+
+
+@dataclass(frozen=True, slots=True)
+class Check:
+    name: str
+    ok: bool
+    detail: str
+
+
+def finale_checks() -> tuple[Check, ...]:
+    checks = []
+    solver_image_available = False
+    for module, label in (("imgui_bundle", "ImGui Bundle"), ("pyvista", "PyVista"), ("vtk", "VTK")):
+        available = importlib.util.find_spec(module) is not None
+        checks.append(Check(label, available, "available" if available else "missing; install the studio extra"))
+    try:
+        engine = ContainerEngine.discover()
+        checks.append(Check("container engine", True, engine.name))
+        solver_image_available = engine.image_exists()
+        checks.append(Check("pinned solver image", solver_image_available, SOLVER_IMAGE if solver_image_available else f"missing: {SOLVER_IMAGE}"))
+    except ContainerUnavailableError as exc:
+        checks.append(Check("container engine", False, str(exc)))
+        checks.append(Check("pinned solver image", False, "not checked"))
+    native = all(importlib.util.find_spec(module) is not None for module in ("CSXCAD", "openEMS"))
+    checks.append(Check("solver execution", native or solver_image_available, "host bindings" if native else "pinned container image" if solver_image_available else "unavailable"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="jaam-doctor-") as directory:
+            probe = Path(directory) / "write-test"
+            probe.write_text("ok", encoding="utf-8")
+        checks.append(Check("artifact directory", True, "writable"))
+    except OSError as exc:
+        checks.append(Check("artifact directory", False, str(exc)))
+    return tuple(checks)
