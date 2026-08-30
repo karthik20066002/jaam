@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 import re
-from typing import Iterable, Sequence
+from time import perf_counter_ns
+from typing import Callable, Iterable, Sequence
 
 from .diagnostics import CompilationError, Diagnostic
 from .ir import (
@@ -57,6 +58,7 @@ _MATERIALS = {
     "earth_dry": MaterialSpec("earth_dry", "dielectric", epsilon=4.0, conductivity=0.001),
 }
 _BOUNDARIES = {"free_space": "PML_8", "pml_8": "PML_8", "pec": "PEC", "mur": "MUR"}
+TraceCallback = Callable[[str, int, dict[str, int]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +89,7 @@ class _BoxSource:
 
 
 class _Analyzer:
-    def __init__(self, program: Program):
+    def __init__(self, program: Program, trace: TraceCallback | None = None):
         self.program = program
         self.errors: list[Diagnostic] = []
         self.warnings: list[str] = []
@@ -95,22 +97,34 @@ class _Analyzer:
         self.type_defaults: dict[str, dict[str, Expr]] = {}
         self.names: dict[str, _WireSource | _BoxSource] = {}
         self.rotations: list[RotPolyOp] = []
+        self.trace = trace
+
+    def _record(self, name: str, started_ns: int, **statistics: int) -> None:
+        if self.trace is not None:
+            self.trace(name, perf_counter_ns() - started_ns, statistics)
 
     def error(self, code: str, message: str, span: SourceSpan) -> None:
         self.errors.append(Diagnostic(code, message, span))
 
     def analyze(self) -> SimulationIR:
+        started = perf_counter_ns()
         frequency, boundary = self._directives()
+        self._collect_defaults()
+        self._record("defaults-and-unit-resolution", started, defaults=len(self.global_defaults) + sum(map(len, self.type_defaults.values())))
         if frequency is None:
             self._raise()
             raise AssertionError
         wavelength = C0 / frequency.upper_hz
-        self._collect_defaults()
+        started = perf_counter_ns()
         for statement in self.program.statements:
             if isinstance(statement, PrimitiveDecl):
                 self._primitive(statement, wavelength)
+        self._record("path-and-composite-expansion", started, declarations=len(self.names), revolutions=len(self.rotations))
+        started = perf_counter_ns()
         self._raise()
+        self._record("validation-and-constant-folding", started, diagnostics=len(self.errors), warnings=len(self.warnings))
 
+        started = perf_counter_ns()
         geometry: list[GeometryOp] = []
         for source in self.names.values():
             if source.consumed:
@@ -138,11 +152,16 @@ class _Analyzer:
         if not geometry:
             self.error("J220", "program contains no effective geometry", SourceSpan.unknown())
             self._raise()
+        self._record("dead-structure-elimination-and-deduplication", started, effective_primitives=len(geometry))
 
+        started = perf_counter_ns()
+        self._record("thin-and-thick-wire-lowering", started, thin_wires=sum(isinstance(op, CurveOp) for op in geometry), thick_wires=sum(isinstance(op, WireOp) for op in geometry))
+        started = perf_counter_ns()
         domain_min, domain_max, geometry = self._domain(geometry, wavelength, boundary)
         mesh = self._mesh(geometry, domain_min, domain_max, wavelength)
         used = {op.material for op in geometry}
         materials = tuple(_MATERIALS[name] for name in sorted(used))
+        self._record("domain-and-mesh-construction", started, mesh_cells=(len(mesh.lines_x) - 1) * (len(mesh.lines_y) - 1) * (len(mesh.lines_z) - 1), materials=len(materials))
         return SimulationIR(
             frequency,
             boundary,
@@ -575,5 +594,5 @@ class _Analyzer:
         return left, right
 
 
-def analyze(program: Program) -> SimulationIR:
-    return _Analyzer(program).analyze()
+def analyze(program: Program, *, trace: TraceCallback | None = None) -> SimulationIR:
+    return _Analyzer(program, trace).analyze()

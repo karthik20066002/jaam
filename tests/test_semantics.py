@@ -5,6 +5,27 @@ import pytest
 from jaam.compiler import compile_file, compile_text
 from jaam.diagnostics import CompilationError
 from jaam.ir import BoxOp, CurveOp, RotPolyOp, WireOp
+from jaam.frontend import parse_text
+from jaam.semantics import analyze
+
+
+def test_semantic_pass_trace_is_ordered_and_measured():
+    source = (
+        "frequency 1GHz; default { material:copper; radius:1mm; } "
+        "wire element(path:line(from:(-1cm,0,0),to:(1cm,0,0)));"
+    )
+    entries = []
+    analyze(parse_text(source), trace=lambda name, duration, stats: entries.append((name, duration, stats)))
+    assert [entry[0] for entry in entries] == [
+        "defaults-and-unit-resolution",
+        "path-and-composite-expansion",
+        "validation-and-constant-folding",
+        "dead-structure-elimination-and-deduplication",
+        "thin-and-thick-wire-lowering",
+        "domain-and-mesh-construction",
+    ]
+    assert all(duration >= 0 for _, duration, _ in entries)
+    assert entries[-1][2]["mesh_cells"] > 0
 
 
 def test_canonical_yagi_compiles():
