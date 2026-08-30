@@ -25,6 +25,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("-o", "--output", type=Path)
         if name == "run":
             command.add_argument("--output-dir", type=Path)
+    studio = subparsers.add_parser("studio")
+    studio.add_argument("source", type=Path, nargs="?")
     return parser
 
 
@@ -52,6 +54,15 @@ def _summary(ir: SimulationIR) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "studio":
+        try:
+            from .studio import launch
+
+            launch(args.source)
+        except (OSError, RuntimeError) as exc:
+            print(f"jaam: {exc}", file=sys.stderr)
+            return 2
+        return 0
     try:
         result = compile_file_result(args.source)
         ir = result.ir
