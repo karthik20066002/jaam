@@ -1,0 +1,33 @@
+frequency 2450MHz;
+boundary free_space;
+
+default {
+    material: copper;
+}
+
+wire reflector(
+    path: line(from: (0, -0.0305, 0), to: (0, 0.0305, 0)),
+    radius: 1.5mm
+);
+
+wire driven(
+    path: line(from: (0.02, -0.029, 0), to: (0.02, 0.029, 0)),
+    radius: 1.5mm,
+    feed: port(impedance: 50ohm)
+);
+
+wire director1(
+    path: line(from: (0.05, -0.027, 0), to: (0.05, 0.027, 0)),
+    radius: 1.5mm
+);
+
+wire director2(
+    path: line(from: (0.08, -0.0255, 0), to: (0.08, 0.0255, 0)),
+    radius: 1.5mm
+);
+
+wire director3(
+    path: line(from: (0.11, -0.0245, 0), to: (0.11, 0.0245, 0)),
+    radius: 1.5mm
+);
+

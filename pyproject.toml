@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaamlang"
+version = "0.1.0"
+description = "JAAM declarative antenna modelling language"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "antlr4-python3-runtime==4.13.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+]
+
+[project.scripts]
+jaam = "jaam.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaam"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+

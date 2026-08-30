@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$project_dir/src:$PYTHONPATH"
+else
+    export PYTHONPATH="$project_dir/src"
+fi
+exec python3 -m jaam.cli "$@"
+
