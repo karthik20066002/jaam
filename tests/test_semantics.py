@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from jaam.compiler import compile_file, compile_text
+from jaam.compiler import compile_file, compile_file_result, compile_text
 from jaam.diagnostics import CompilationError
 from jaam.ir import BoxOp, CurveOp, RotPolyOp, WireOp
 from jaam.frontend import parse_text
@@ -37,6 +37,16 @@ def test_canonical_yagi_compiles():
     assert all(len(lines) > 2 for lines in (ir.mesh.lines_x, ir.mesh.lines_y, ir.mesh.lines_z))
     wavelength = 299_792_458 / 2.45e9
     assert ir.domain_max[2] >= 0.64 * wavelength
+
+
+def test_compilation_result_links_lowered_geometry_to_source():
+    result = compile_file_result(Path("examples/yagi.jaam"))
+    assert result.ast.source == Path("examples/yagi.jaam")
+    assert result.ir.geometry
+    assert result.passes[0].name == "parse"
+    assert result.duration_ns >= 0
+    assert result.source_map["driven__a"].line == 13
+    assert result.source_map["driven__b"].line == 13
 
 
 def test_thick_wire_and_unit_conversion():
