@@ -9,3 +9,5 @@ htmlcov/
 dist/
 jaam-out/
 *-out/
+JAAM_Studio.ini
+midscene_run/

@@ -12,6 +12,7 @@ def test_run_artifacts_are_versioned_complete_and_unique(tmp_path):
     second, _ = create_run_artifact(tmp_path, source, result)
 
     assert first != second
+    assert first.is_absolute()
     assert manifest["schemaVersion"] == 1
     assert manifest["mesh"]["totalCells"] > 0
     assert len(manifest["hashes"]["sourceSha256"]) == 64

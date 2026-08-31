@@ -20,7 +20,10 @@ def create_run_artifact(
     """Create a fresh run directory; existing solver output is never reused."""
     created = datetime.now(timezone.utc)
     run_id = f"{created:%Y%m%dT%H%M%S.%fZ}-{uuid.uuid4().hex[:8]}"
-    run_dir = root / run_id
+    # openEMS changes the process working directory while running. Always hand
+    # the solver an absolute artifact path so that simulation and log files do
+    # not move out from under the runtime.
+    run_dir = (root / run_id).resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
 
     ir_text = json.dumps(ir_to_dict(result.ir), indent=2, sort_keys=True) + "\n"

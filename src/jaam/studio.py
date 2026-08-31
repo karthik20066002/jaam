@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
+import os
 import subprocess
 import sys
 from threading import Thread
@@ -70,21 +71,32 @@ class StudioState:
         if self.source_path is None:
             raise ValueError("save the source before running openEMS")
         self.save()
+        repository = Path(__file__).resolve().parents[2]
+        # openEMS is packaged for the host interpreter. Keep Studio itself in
+        # uv, but deliberately execute simulations with the system Python.
+        command = ["/usr/bin/python3", "-m", "jaam.cli"]
+        environment = os.environ.copy()
+        source_root = str(repository / "src")
+        environment["PYTHONPATH"] = source_root + (
+            os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
+        )
+        full_command = [
+            *command,
+            "run",
+            str(self.source_path),
+            "--output-dir",
+            str(output_root / self.source_path.stem),
+        ]
+        self.solver_log.clear()
+        self.solver_log.append("$ " + " ".join(full_command))
         self.process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "jaam.cli",
-                "run",
-                str(self.source_path),
-                "--output-dir",
-                str(output_root / self.source_path.stem),
-            ],
+            full_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            cwd=repository,
+            env=environment,
         )
-        self.solver_log.clear()
         self._reader = Thread(target=self._read_solver_output, daemon=True)
         self._reader.start()
 
@@ -119,12 +131,31 @@ def launch(path: Path | None = None) -> None:
 
     def gui() -> None:
         state.poll_solver_log()
-        imgui.dock_space_over_viewport()
         io = imgui.get_io()
-        compile_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.b)
-        run_requested = imgui.is_key_pressed(imgui.Key.f5)
-        save_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.s)
-        imgui.begin("JAAM Source")
+        width = max(float(io.display_size.x), 960.0)
+        height = max(float(io.display_size.y), 640.0)
+        margin = 12.0
+        gap = 8.0
+        left_width = width * (0.64 if not state.presentation_mode else 0.72)
+        right_x = left_width + gap
+        right_width = width - right_x - margin
+        source_height = height * 0.68
+        build_height = height * 0.43
+        window_flags = imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_move
+
+        compile_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.b, False)
+        run_requested = imgui.is_key_pressed(imgui.Key.f5, False)
+        save_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.s, False)
+
+        imgui.set_next_window_pos(imgui.ImVec2(margin, margin), imgui.Cond_.always)
+        imgui.set_next_window_size(
+            imgui.ImVec2(left_width - margin, source_height - margin), imgui.Cond_.always
+        )
+        imgui.begin("JAAM Source", flags=window_flags)
+        imgui.text_colored((0.30, 0.78, 1.0, 1.0), "JAAM STUDIO  /  SOURCE")
+        imgui.same_line()
+        imgui.text_disabled(str(state.source_path or "Untitled"))
+        imgui.separator()
         changed, text = imgui.input_text_multiline(
             "##source", state.source_text, imgui.ImVec2(-1, -1)
         )
@@ -133,7 +164,14 @@ def launch(path: Path | None = None) -> None:
             state.last_edit = monotonic()
         imgui.end()
 
-        imgui.begin("Solver Log")
+        imgui.set_next_window_pos(imgui.ImVec2(margin, source_height + gap), imgui.Cond_.always)
+        imgui.set_next_window_size(
+            imgui.ImVec2(left_width - margin, height - source_height - gap - margin),
+            imgui.Cond_.always,
+        )
+        imgui.begin("Solver Log", flags=window_flags)
+        if not state.solver_log:
+            imgui.text_disabled("No live run yet. Save the model and press F5.")
         for line in state.solver_log:
             imgui.text_unformatted(line)
         if state.process is not None:
@@ -141,7 +179,11 @@ def launch(path: Path | None = None) -> None:
             imgui.text(f"Solver: {status}")
         imgui.end()
 
-        imgui.begin("Build")
+        imgui.set_next_window_pos(imgui.ImVec2(right_x, margin), imgui.Cond_.always)
+        imgui.set_next_window_size(
+            imgui.ImVec2(right_width, build_height - margin), imgui.Cond_.always
+        )
+        imgui.begin("Build / Pass Trace", flags=window_flags)
         if imgui.button("Compile  Ctrl+B") or compile_requested:
             state.compile_now()
         imgui.same_line()
@@ -158,21 +200,28 @@ def launch(path: Path | None = None) -> None:
         if save_requested and state.source_path is not None:
             state.save()
         _, state.presentation_mode = imgui.checkbox("Presentation mode", state.presentation_mode)
+        imgui.separator()
         if state.compilation:
+            imgui.text_colored((0.35, 0.9, 0.5, 1.0), "COMPILE OK")
             for compiler_pass in state.compilation.passes:
                 imgui.text(f"{compiler_pass.name}: {compiler_pass.duration_ns / 1e6:.3f} ms")
         for diagnostic in state.diagnostics:
             imgui.text_colored((1.0, 0.35, 0.25, 1.0), f"{diagnostic.code}: {diagnostic.message}")
         imgui.end()
 
-        imgui.begin("Geometry / Mesh")
+        imgui.set_next_window_pos(imgui.ImVec2(right_x, build_height + gap), imgui.Cond_.always)
+        imgui.set_next_window_size(
+            imgui.ImVec2(right_width, height - build_height - gap - margin), imgui.Cond_.always
+        )
+        imgui.begin("Geometry / Mesh", flags=window_flags)
         if state.compilation:
             ir = state.compilation.ir
-            imgui.text(f"Primitives: {len(ir.geometry)}")
-            imgui.text(f"Projection: {state.active_plane.upper()}")
+            imgui.text_colored((0.30, 0.78, 1.0, 1.0), f"{state.active_plane.upper()} PROJECTION")
+            imgui.text(f"Primitives  {len(ir.geometry)}")
             imgui.text(
-                f"Mesh: {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
+                f"Mesh cells  {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
             )
+            imgui.separator()
             for op in ir.geometry:
                 selected, _ = imgui.selectable(op.name, state.selected_primitive == op.name)
                 if selected:
@@ -184,7 +233,7 @@ def launch(path: Path | None = None) -> None:
             state.compile_now()
             state.last_edit = float("inf")
 
-    immapp.run(gui_function=gui, window_title="JAAM Studio", window_size=(1440, 900))
+    immapp.run(gui_function=gui, window_title="JAAM Studio — LIVE", window_size=(1440, 900))
 
 
 def _unknown_span():

@@ -33,3 +33,24 @@ def test_solver_log_polling_is_non_blocking():
     assert state.poll_solver_log() == ("iteration 100", "iteration 200")
     assert state.poll_solver_log() == ()
     assert state.solver_log == ["iteration 100", "iteration 200"]
+
+
+def test_solver_uses_system_python_with_repository_on_path(monkeypatch, tmp_path):
+    source = tmp_path / "dipole.jaam"
+    state = StudioState.open(None)
+    state.source_path = source
+    calls = []
+
+    class Process:
+        stdout = ()
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr("jaam.studio.subprocess.Popen", lambda command, **options: calls.append((command, options)) or Process())
+    state.start_run(tmp_path / "runs")
+    command, options = calls[0]
+    assert command[:3] == ["/usr/bin/python3", "-m", "jaam.cli"]
+    assert command[3:5] == ["run", str(source)]
+    assert options["cwd"] == Path(__file__).resolve().parents[1]
+    assert options["env"]["PYTHONPATH"].split(":")[0].endswith("/src")
