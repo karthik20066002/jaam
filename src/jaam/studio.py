@@ -11,6 +11,8 @@ from time import monotonic
 
 from .compiler import CompilationResult, compile_text_result
 from .diagnostics import CompilationError, Diagnostic
+from .ir import BoxOp, CurveOp, WireOp
+from .plots import project_geometry
 
 
 STARTER_SOURCE = """frequency 1GHz;
@@ -32,6 +34,10 @@ class StudioState:
     selected_primitive: str | None = None
     active_plane: str = "xy"
     slice_coordinate: float = 0.0
+    show_mesh: bool = True
+    show_domain: bool = True
+    show_feed: bool = True
+    fit_geometry: bool = True
     presentation_mode: bool = False
     process: subprocess.Popen | None = field(default=None, repr=False)
     solver_log: list[str] = field(default_factory=list)
@@ -123,11 +129,111 @@ class StudioState:
 
 def launch(path: Path | None = None) -> None:
     try:
-        from imgui_bundle import imgui, immapp
+        import numpy as np
+        from imgui_bundle import imgui, immapp, implot
     except ImportError as exc:
         raise RuntimeError("JAAM Studio requires: uv sync --extra studio") from exc
 
     state = StudioState.open(path)
+
+    def line_spec(color, weight=1.0):
+        spec = implot.Spec()
+        spec.line_color = imgui.ImVec4(*color)
+        spec.line_weight = weight
+        return spec
+
+    def plot_segment(label: str, points, color, weight=1.0) -> None:
+        if len(points) < 2:
+            return
+        xs = np.asarray([point[0] for point in points], dtype=np.float64)
+        ys = np.asarray([point[1] for point in points], dtype=np.float64)
+        implot.plot_line(label, xs, ys, line_spec(color, weight))
+
+    def geometry_plot() -> None:
+        result = state.compilation
+        if result is None:
+            imgui.text_disabled("Compile a valid model to display geometry.")
+            return
+        ir = result.ir
+        plane = state.active_plane
+        axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[plane]
+        lo = ir.domain_min
+        hi = ir.domain_max
+
+        if imgui.radio_button("XY", plane == "xy"):
+            state.active_plane, state.fit_geometry = "xy", True
+        imgui.same_line()
+        if imgui.radio_button("XZ", plane == "xz"):
+            state.active_plane, state.fit_geometry = "xz", True
+        imgui.same_line()
+        if imgui.radio_button("YZ", plane == "yz"):
+            state.active_plane, state.fit_geometry = "yz", True
+        imgui.same_line()
+        if imgui.button("Fit"):
+            state.fit_geometry = True
+        _, state.show_mesh = imgui.checkbox("Mesh", state.show_mesh)
+        imgui.same_line()
+        _, state.show_domain = imgui.checkbox("Domain", state.show_domain)
+        imgui.same_line()
+        _, state.show_feed = imgui.checkbox("Feed", state.show_feed)
+
+        if state.fit_geometry:
+            implot.set_next_axes_to_fit()
+            state.fit_geometry = False
+        plot_size = imgui.ImVec2(-1, max(imgui.get_content_region_avail().y - 4, 180))
+        if not implot.begin_plot(
+            f"##geometry-{state.active_plane}", plot_size, implot.Flags_.equal | implot.Flags_.no_title
+        ):
+            return
+        try:
+            labels = {"xy": ("X (m)", "Y (m)"), "xz": ("X (m)", "Z (m)"), "yz": ("Y (m)", "Z (m)")}
+            implot.setup_axes(*labels[state.active_plane])
+            horizontal, vertical = axes
+            bounds = (
+                (lo[horizontal], lo[vertical]),
+                (hi[horizontal], lo[vertical]),
+                (hi[horizontal], hi[vertical]),
+                (lo[horizontal], hi[vertical]),
+                (lo[horizontal], lo[vertical]),
+            )
+            if state.show_domain:
+                plot_segment("Domain", bounds, (0.28, 0.52, 0.72, 0.85), 1.5)
+
+            if state.show_mesh:
+                mesh_axes = (ir.mesh.lines_x, ir.mesh.lines_y, ir.mesh.lines_z)
+                mesh_spec = line_spec((0.24, 0.29, 0.33, 0.45), 0.5)
+                for index, value in enumerate(mesh_axes[horizontal]):
+                    xs = np.asarray((value, value), dtype=np.float64)
+                    ys = np.asarray((lo[vertical], hi[vertical]), dtype=np.float64)
+                    implot.plot_line(f"##mesh-h-{index}", xs, ys, mesh_spec)
+                for index, value in enumerate(mesh_axes[vertical]):
+                    xs = np.asarray((lo[horizontal], hi[horizontal]), dtype=np.float64)
+                    ys = np.asarray((value, value), dtype=np.float64)
+                    implot.plot_line(f"##mesh-v-{index}", xs, ys, mesh_spec)
+
+            colors = {
+                "copper": (0.95, 0.55, 0.18, 1.0),
+                "gold": (1.0, 0.82, 0.25, 1.0),
+                "pec": (0.75, 0.82, 0.9, 1.0),
+                "earth_dry": (0.48, 0.34, 0.2, 1.0),
+            }
+            for op in ir.geometry:
+                selected = op.name == state.selected_primitive
+                color = (0.2, 0.9, 1.0, 1.0) if selected else colors.get(op.material, (0.8, 0.8, 0.8, 1.0))
+                plot_segment(op.name, project_geometry(op, state.active_plane), color, 4.0 if selected else 2.5)
+                if implot.is_legend_entry_hovered(op.name) and imgui.is_mouse_clicked(0):
+                    state.selected_primitive = op.name
+                if state.show_feed and isinstance(op, (CurveOp, WireOp)) and op.feed:
+                    feed_points = (
+                        (op.feed.start[horizontal], op.feed.start[vertical]),
+                        (op.feed.stop[horizontal], op.feed.stop[vertical]),
+                    )
+                    plot_segment(f"Feed {op.feed.impedance_ohm:g} ohm", feed_points, (1.0, 0.2, 0.35, 1.0), 5.0)
+            if implot.is_plot_hovered():
+                mouse = implot.get_plot_mouse_pos()
+                imgui.set_tooltip(f"{labels[state.active_plane][0][0]} {mouse.x:.6g} m\n{labels[state.active_plane][1][0]} {mouse.y:.6g} m")
+        finally:
+            implot.end_plot()
 
     def gui() -> None:
         state.poll_solver_log()
@@ -216,16 +322,10 @@ def launch(path: Path | None = None) -> None:
         imgui.begin("Geometry / Mesh", flags=window_flags)
         if state.compilation:
             ir = state.compilation.ir
-            imgui.text_colored((0.30, 0.78, 1.0, 1.0), f"{state.active_plane.upper()} PROJECTION")
-            imgui.text(f"Primitives  {len(ir.geometry)}")
-            imgui.text(
-                f"Mesh cells  {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
+            imgui.text_disabled(
+                f"{len(ir.geometry)} primitives  |  mesh {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
             )
-            imgui.separator()
-            for op in ir.geometry:
-                selected, _ = imgui.selectable(op.name, state.selected_primitive == op.name)
-                if selected:
-                    state.selected_primitive = op.name
+            geometry_plot()
         imgui.end()
 
         if changed is False and monotonic() - state.last_edit > 0.35:
