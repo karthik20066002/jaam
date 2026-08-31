@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
 import os
+import re
 import subprocess
 import sys
 from threading import Thread
@@ -13,6 +14,10 @@ from .compiler import CompilationResult, compile_text_result
 from .diagnostics import CompilationError, Diagnostic
 from .ir import BoxOp, CurveOp, WireOp
 from .plots import project_geometry
+from .plots import front_to_back_ratio, half_power_beamwidth, normalize_gain
+from .results import RadiationPattern, load_nf2ff
+
+_PORT_RESULT = re.compile(r";\s*(/.+/port\d+_s11\.csv)$")
 
 
 STARTER_SOURCE = """frequency 1GHz;
@@ -38,6 +43,13 @@ class StudioState:
     show_domain: bool = True
     show_feed: bool = True
     fit_geometry: bool = True
+    active_visual: str = "geometry"
+    radiation_cut: str = "e"
+    normalized_gain: bool = True
+    radiation: RadiationPattern | None = None
+    artifact_dir: Path | None = None
+    radiation_error: str | None = None
+    fit_radiation: bool = True
     presentation_mode: bool = False
     process: subprocess.Popen | None = field(default=None, repr=False)
     solver_log: list[str] = field(default_factory=list)
@@ -120,6 +132,15 @@ class StudioState:
             except Empty:
                 break
         self.solver_log.extend(fresh)
+        for line in fresh:
+            if match := _PORT_RESULT.search(line):
+                self.artifact_dir = Path(match.group(1)).parent
+                try:
+                    self.radiation = load_nf2ff(self.artifact_dir / "nf2ff.csv")
+                    self.radiation_error = None
+                    self.active_visual = "radiation"
+                except (OSError, ValueError) as exc:
+                    self.radiation_error = str(exc)
         return tuple(fresh)
 
     def cancel_run(self) -> None:
@@ -177,9 +198,6 @@ def launch(path: Path | None = None) -> None:
         imgui.same_line()
         _, state.show_feed = imgui.checkbox("Feed", state.show_feed)
 
-        if state.fit_geometry:
-            implot.set_next_axes_to_fit()
-            state.fit_geometry = False
         plot_size = imgui.ImVec2(-1, max(imgui.get_content_region_avail().y - 4, 180))
         if not implot.begin_plot(
             f"##geometry-{state.active_plane}", plot_size, implot.Flags_.equal | implot.Flags_.no_title
@@ -189,6 +207,22 @@ def launch(path: Path | None = None) -> None:
             labels = {"xy": ("X (m)", "Y (m)"), "xz": ("X (m)", "Z (m)"), "yz": ("Y (m)", "Z (m)")}
             implot.setup_axes(*labels[state.active_plane])
             horizontal, vertical = axes
+            if state.fit_geometry:
+                x_span = max(hi[horizontal] - lo[horizontal], 1e-9)
+                y_span = max(hi[vertical] - lo[vertical], 1e-9)
+                implot.setup_axis_limits(
+                    implot.ImAxis_.x1,
+                    lo[horizontal] - 0.04 * x_span,
+                    hi[horizontal] + 0.04 * x_span,
+                    implot.Cond_.always,
+                )
+                implot.setup_axis_limits(
+                    implot.ImAxis_.y1,
+                    lo[vertical] - 0.04 * y_span,
+                    hi[vertical] + 0.04 * y_span,
+                    implot.Cond_.always,
+                )
+                state.fit_geometry = False
             bounds = (
                 (lo[horizontal], lo[vertical]),
                 (hi[horizontal], lo[vertical]),
@@ -232,6 +266,73 @@ def launch(path: Path | None = None) -> None:
             if implot.is_plot_hovered():
                 mouse = implot.get_plot_mouse_pos()
                 imgui.set_tooltip(f"{labels[state.active_plane][0][0]} {mouse.x:.6g} m\n{labels[state.active_plane][1][0]} {mouse.y:.6g} m")
+        finally:
+            implot.end_plot()
+
+    def radiation_plot() -> None:
+        pattern = state.radiation
+        if pattern is None:
+            imgui.text_disabled("Run the model to calculate NF2FF radiation cuts.")
+            if state.radiation_error:
+                imgui.text_colored((1.0, 0.35, 0.25, 1.0), state.radiation_error)
+            return
+        if imgui.radio_button("E-plane / XY", state.radiation_cut == "e"):
+            state.radiation_cut, state.fit_radiation = "e", True
+        imgui.same_line()
+        if imgui.radio_button("H-plane / XZ", state.radiation_cut == "h"):
+            state.radiation_cut, state.fit_radiation = "h", True
+        imgui.same_line()
+        changed_normalization, state.normalized_gain = imgui.checkbox(
+            "Normalized", state.normalized_gain
+        )
+        if changed_normalization:
+            state.fit_radiation = True
+
+        if state.radiation_cut == "e":
+            angles, absolute_gain = pattern.azimuth_cut()
+            cut_name = "E-plane (XY, theta=90 deg)"
+        else:
+            angles, absolute_gain = pattern.elevation_cut()
+            cut_name = "H-plane (XZ, phi=0 deg)"
+        gain = normalize_gain(absolute_gain) if state.normalized_gain else absolute_gain
+        beamwidth = half_power_beamwidth(angles, gain)
+        front_back = front_to_back_ratio(angles, gain) if state.radiation_cut == "e" else None
+        imgui.text(
+            f"{pattern.frequency_hz / 1e6:.3f} MHz  |  peak {pattern.peak_gain_db:.2f} dBi"
+        )
+        if beamwidth is not None:
+            imgui.same_line()
+            imgui.text(f"|  HPBW {beamwidth:.1f} deg")
+        if front_back is not None:
+            imgui.same_line()
+            imgui.text(f"|  F/B {front_back:.2f} dB")
+
+        plot_size = imgui.ImVec2(-1, max(imgui.get_content_region_avail().y - 4, 180))
+        if not implot.begin_plot(cut_name, plot_size, implot.Flags_.no_title):
+            return
+        try:
+            implot.setup_axes("Angle (deg)", "Gain (dB)")
+            if state.fit_radiation:
+                padding = max((max(gain) - min(gain)) * 0.08, 1.0)
+                implot.setup_axis_limits(
+                    implot.ImAxis_.x1, min(angles), max(angles), implot.Cond_.always
+                )
+                implot.setup_axis_limits(
+                    implot.ImAxis_.y1,
+                    min(gain) - padding,
+                    max(gain) + padding,
+                    implot.Cond_.always,
+                )
+                state.fit_radiation = False
+            plot_segment(
+                "Normalized gain" if state.normalized_gain else "Absolute gain",
+                tuple(zip(angles, gain)),
+                (0.2, 0.82, 1.0, 1.0),
+                2.5,
+            )
+            if implot.is_plot_hovered():
+                mouse = implot.get_plot_mouse_pos()
+                imgui.set_tooltip(f"angle {mouse.x:.2f} deg\ngain {mouse.y:.2f} dB")
         finally:
             implot.end_plot()
 
@@ -320,12 +421,21 @@ def launch(path: Path | None = None) -> None:
             imgui.ImVec2(right_width, height - build_height - gap - margin), imgui.Cond_.always
         )
         imgui.begin("Geometry / Mesh", flags=window_flags)
+        if imgui.radio_button("Geometry", state.active_visual == "geometry"):
+            state.active_visual = "geometry"
+        imgui.same_line()
+        if imgui.radio_button("Radiation cuts", state.active_visual == "radiation"):
+            state.active_visual = "radiation"
+        imgui.separator()
         if state.compilation:
             ir = state.compilation.ir
-            imgui.text_disabled(
-                f"{len(ir.geometry)} primitives  |  mesh {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
-            )
-            geometry_plot()
+            if state.active_visual == "geometry":
+                imgui.text_disabled(
+                    f"{len(ir.geometry)} primitives  |  mesh {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
+                )
+                geometry_plot()
+            else:
+                radiation_plot()
         imgui.end()
 
         if changed is False and monotonic() - state.last_edit > 0.35:
@@ -333,7 +443,11 @@ def launch(path: Path | None = None) -> None:
             state.compile_now()
             state.last_edit = float("inf")
 
-    immapp.run(gui_function=gui, window_title="JAAM Studio — LIVE", window_size=(1440, 900))
+    plot_context = implot.create_context()
+    try:
+        immapp.run(gui_function=gui, window_title="JAAM Studio — LIVE", window_size=(1440, 900))
+    finally:
+        implot.destroy_context(plot_context)
 
 
 def _unknown_span():

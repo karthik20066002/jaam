@@ -164,8 +164,8 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
     farfield = nf2ff.CalcNF2FF(
         str(output_dir),
         best_frequency,
-        np.deg2rad(theta_deg),
-        np.deg2rad(phi_deg),
+        theta_deg,
+        phi_deg,
         read_cached=False,
     )
     magnitude = np.squeeze(np.asarray(farfield.E_norm, dtype=float))
