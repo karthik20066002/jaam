@@ -167,8 +167,18 @@ class GradedMeshCoarseningPass(Pass):
             t = min(1.0, (min_dist - near_dist) / transition_dist)
             return fine_res + t * (coarse_res - fine_res)
 
+        feature_set: set[float] = set()
+        for line in sorted_lines:
+            if any(abs(line - coord) <= near_dist for coord in feature_coords):
+                feature_set.add(line)
+        feature_set.add(sorted_lines[0])
+        feature_set.add(sorted_lines[-1])
+
         kept = [sorted_lines[0]]
         for line in sorted_lines[1:]:
+            if line in feature_set:
+                kept.append(line)
+                continue
             gap = line - kept[-1]
             if gap >= target_resolution(line):
                 kept.append(line)
@@ -298,4 +308,90 @@ class MergeCollinearWiresPass(Pass):
         return max(spans)
 
 
-DEFAULT_PASSES: PassList = (ValidateFeedsPass(), MergeCollinearWiresPass(), GradedMeshCoarseningPass())
+class ValidateMeshResolutionPass(Pass):
+    """Check that the smallest geometric features are resolved by the mesh."""
+
+    name = "validate-mesh-resolution"
+
+    # Smallest feature (wire radius, box edge) must span at least this many
+    # mesh cells, where one cell is ir.mesh.max_resolution_m.
+    min_feature_cells: int = 2
+    # Feed gap must span at least this many mesh cells.
+    min_feed_gap_cells: int = 3
+
+    def run(self, ir: SimulationIR) -> PassResult:
+        diagnostics: list[Diagnostic] = []
+        max_res = ir.mesh.max_resolution_m
+        if max_res <= 0:
+            diagnostics.append(
+                Diagnostic(
+                    "J211",
+                    "mesh max resolution must be positive",
+                    SourceSpan.unknown("<input>"),
+                )
+            )
+            return PassResult(ir, diagnostics=tuple(diagnostics), statistics={"issues": len(diagnostics)})
+
+        for op in ir.geometry:
+            if isinstance(op, WireOp):
+                cells = op.radius_m / max_res
+                if cells < self.min_feature_cells:
+                    diagnostics.append(
+                        Diagnostic(
+                            "J212",
+                            f"thick wire '{op.name}' radius ({op.radius_m:g} m) is "
+                            f"smaller than {self.min_feature_cells} mesh cells ({max_res:g} m)",
+                            SourceSpan.unknown("<input>"),
+                        )
+                    )
+            elif isinstance(op, BoxOp):
+                edges = tuple(op.stop[i] - op.start[i] for i in range(3))
+                min_edge = min(edges)
+                if min_edge / max_res < self.min_feature_cells:
+                    diagnostics.append(
+                        Diagnostic(
+                            "J213",
+                            f"box '{op.name}' smallest edge ({min_edge:g} m) is "
+                            f"smaller than {self.min_feature_cells} mesh cells ({max_res:g} m)",
+                            SourceSpan.unknown("<input>"),
+                        )
+                    )
+            if isinstance(op, (CurveOp, WireOp)) and op.feed is not None:
+                gap = math.dist(op.feed.start, op.feed.stop)
+                axis_index = {"x": 0, "y": 1, "z": 2}[op.feed.direction]
+                mesh_lines = (ir.mesh.lines_x, ir.mesh.lines_y, ir.mesh.lines_z)[axis_index]
+                local_res = self._local_resolution(
+                    mesh_lines,
+                    min(op.feed.start[axis_index], op.feed.stop[axis_index]),
+                    max(op.feed.start[axis_index], op.feed.stop[axis_index]),
+                )
+                if local_res <= 0 or gap / local_res < self.min_feed_gap_cells:
+                    diagnostics.append(
+                        Diagnostic(
+                            "J214",
+                            f"feed gap on '{op.name}' ({gap:g} m) is "
+                            f"smaller than {self.min_feed_gap_cells} local mesh cells ({local_res:g} m)",
+                            SourceSpan.unknown("<input>"),
+                        )
+                    )
+
+        return PassResult(
+            ir,
+            diagnostics=tuple(diagnostics),
+            statistics={"issues": len(diagnostics)},
+        )
+
+    @staticmethod
+    def _local_resolution(lines: tuple[float, ...], lo: float, hi: float) -> float:
+        relevant = [line for line in lines if lo - 1e-12 <= line <= hi + 1e-12]
+        if len(relevant) < 2:
+            return min((b - a for a, b in zip(lines, lines[1:])), default=0.0)
+        return min(b - a for a, b in zip(relevant, relevant[1:]))
+
+
+DEFAULT_PASSES: PassList = (
+    ValidateFeedsPass(),
+    MergeCollinearWiresPass(),
+    GradedMeshCoarseningPass(),
+    ValidateMeshResolutionPass(),
+)

@@ -534,12 +534,26 @@ class _Analyzer:
                     for point in (op.feed.start, op.feed.stop):
                         for i in range(3):
                             axes[i].add(point[i])
+                    self._refine_feed_gap(axes, op.feed)
             elif isinstance(op, BoxOp):
                 for i in range(3):
                     edge_lo, edge_hi = op.start[i], op.stop[i]
                     axes[i].update((edge_lo, edge_hi, edge_lo - max_res / 3, edge_lo + max_res / 3, edge_hi - max_res / 3, edge_hi + max_res / 3))
         lines = [self._fill_lines(sorted(axis), max_res) for axis in axes]
         return MeshSpec(tuple(lines[0]), tuple(lines[1]), tuple(lines[2]), max_res)
+
+    @staticmethod
+    def _refine_feed_gap(axes: list[set[float]], feed: FeedSpec) -> None:
+        """Subdivide the feed gap so it spans at least three mesh cells."""
+        gap = tuple(feed.stop[i] - feed.start[i] for i in range(3))
+        length = math.dist(feed.start, feed.stop)
+        if length <= 0:
+            return
+        # Find dominant axis of the feed gap.
+        dominant = max(range(3), key=lambda i: abs(gap[i]))
+        step = gap[dominant] / 3.0
+        for index in (1, 2):
+            axes[dominant].add(feed.start[dominant] + index * step)
 
     @staticmethod
     def _fill_lines(lines: list[float], max_res: float) -> list[float]:

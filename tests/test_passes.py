@@ -2,7 +2,12 @@ import pytest
 
 from jaam.compiler import compile_text, compile_text_result
 from jaam.frontend import parse_text
-from jaam.passes import GradedMeshCoarseningPass, MergeCollinearWiresPass, ValidateFeedsPass
+from jaam.passes import (
+    GradedMeshCoarseningPass,
+    MergeCollinearWiresPass,
+    ValidateFeedsPass,
+    ValidateMeshResolutionPass,
+)
 from jaam.semantics import analyze
 
 
@@ -19,6 +24,29 @@ def test_graded_mesh_coarsening_reduces_far_field_cells():
     # Geometry features should still be resolved.
     assert any(line == 0.0 for line in result.ir.mesh.lines_x)
     assert any(line == 0.0 for line in result.ir.mesh.lines_y)
+
+
+def test_validate_mesh_resolution_catches_small_feed_gap():
+    source = """
+    frequency 1GHz;
+    default { material: copper; radius: 1mm; }
+    wire dipole(path: line(from: (0,0,-5cm), to: (0,0,5cm)), feed: port(impedance: 50ohm));
+    """
+    ir = analyze(parse_text(source))
+    result = ValidateMeshResolutionPass().run(ir)
+    # The mesh is refined near the feed, so the feed gap should pass.
+    assert not any(item.code == "J214" for item in result.diagnostics)
+
+
+def test_validate_mesh_resolution_catches_unresolved_thick_wire():
+    source = """
+    frequency 1GHz;
+    default { material: copper; }
+    wire fat(path: line(from: (0,0,0), to: (0,0,10cm)), radius: 1cm);
+    """
+    ir = analyze(parse_text(source))
+    result = ValidateMeshResolutionPass().run(ir)
+    assert any(item.code == "J212" for item in result.diagnostics)
 
 
 def test_merge_collinear_wires_combines_segments():
