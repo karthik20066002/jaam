@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
+import math
 import os
 import re
 import subprocess
@@ -15,7 +16,7 @@ from .diagnostics import CompilationError, Diagnostic
 from .ir import BoxOp, CurveOp, WireOp
 from .plots import project_geometry
 from .plots import front_to_back_ratio, half_power_beamwidth, normalize_gain
-from .results import RadiationPattern, load_nf2ff
+from .results import RadiationPattern, center_cut, load_nf2ff
 
 _PORT_RESULT = re.compile(r";\s*(/.+/port\d+_s11\.csv)$")
 
@@ -46,12 +47,22 @@ class StudioState:
     active_visual: str = "geometry"
     radiation_cut: str = "e"
     normalized_gain: bool = True
+    polar_radiation: bool = True
+    center_boresight: bool = True
     radiation: RadiationPattern | None = None
     artifact_dir: Path | None = None
     radiation_error: str | None = None
     fit_radiation: bool = True
     presentation_mode: bool = False
     process: subprocess.Popen | None = field(default=None, repr=False)
+    show_source_panel: bool = True
+    show_solver_log_panel: bool = True
+    show_build_panel: bool = True
+    show_geometry_panel: bool = True
+    open_dialog_path: str = ""
+    save_as_dialog_path: str = ""
+    about_open: bool = False
+    request_quit: bool = False
     solver_log: list[str] = field(default_factory=list)
     _log_queue: Queue[str] = field(default_factory=Queue, repr=False)
     _reader: Thread | None = field(default=None, repr=False)
@@ -82,6 +93,20 @@ class StudioState:
         if self.source_path is None:
             raise ValueError("choose a source path before saving")
         self.source_path.write_text(self.source_text, encoding="utf-8")
+
+    def new_file(self) -> None:
+        self.source_path = None
+        self.source_text = STARTER_SOURCE
+        self.compile_now()
+
+    def open_file(self, path: Path) -> None:
+        self.source_path = path
+        self.source_text = path.read_text(encoding="utf-8")
+        self.compile_now()
+
+    def save_as(self, path: Path) -> None:
+        self.source_path = path
+        self.save()
 
     def start_run(self, output_root: Path = Path("jaam-out")) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -287,6 +312,14 @@ def launch(path: Path | None = None) -> None:
         )
         if changed_normalization:
             state.fit_radiation = True
+        imgui.same_line()
+        if imgui.radio_button("Polar", state.polar_radiation):
+            state.polar_radiation, state.fit_radiation = True, True
+        imgui.same_line()
+        if imgui.radio_button("Cartesian", not state.polar_radiation):
+            state.polar_radiation, state.fit_radiation = False, True
+        imgui.same_line()
+        _, state.center_boresight = imgui.checkbox("Boresight = 0 deg", state.center_boresight)
 
         if state.radiation_cut == "e":
             angles, absolute_gain = pattern.azimuth_cut()
@@ -295,11 +328,20 @@ def launch(path: Path | None = None) -> None:
             angles, absolute_gain = pattern.elevation_cut()
             cut_name = "H-plane (XZ, phi=0 deg)"
         gain = normalize_gain(absolute_gain) if state.normalized_gain else absolute_gain
+        peak_index = max(range(len(absolute_gain)), key=absolute_gain.__getitem__)
+        global_boresight = angles[peak_index]
+        if state.center_boresight:
+            display_angles, display_gain = center_cut(angles, gain, global_boresight)
+        else:
+            display_angles, display_gain = angles, gain
         beamwidth = half_power_beamwidth(angles, gain)
         front_back = front_to_back_ratio(angles, gain) if state.radiation_cut == "e" else None
         imgui.text(
             f"{pattern.frequency_hz / 1e6:.3f} MHz  |  peak {pattern.peak_gain_db:.2f} dBi"
         )
+        if state.center_boresight:
+            imgui.same_line()
+            imgui.text(f"|  boresight {global_boresight:+.0f} deg global")
         if beamwidth is not None:
             imgui.same_line()
             imgui.text(f"|  HPBW {beamwidth:.1f} deg")
@@ -307,38 +349,236 @@ def launch(path: Path | None = None) -> None:
             imgui.same_line()
             imgui.text(f"|  F/B {front_back:.2f} dB")
 
+        if state.polar_radiation:
+            if state.normalized_gain:
+                radial_min, radial_max = -40.0, 0.0
+            else:
+                radial_max = np.ceil(max(display_gain) / 5.0) * 5.0
+                radial_min = np.floor(min(display_gain) / 5.0) * 5.0
+                if radial_max - radial_min < 10.0:
+                    radial_min = radial_max - 10.0
+        else:
+            radial_min = radial_max = 0.0
+
         plot_size = imgui.ImVec2(-1, max(imgui.get_content_region_avail().y - 4, 180))
-        if not implot.begin_plot(cut_name, plot_size, implot.Flags_.no_title):
+        plot_flags = implot.Flags_.no_title | (implot.Flags_.equal if state.polar_radiation else 0)
+        if not implot.begin_plot(cut_name, plot_size, plot_flags):
             return
         try:
-            implot.setup_axes("Angle (deg)", "Gain (dB)")
-            if state.fit_radiation:
-                padding = max((max(gain) - min(gain)) * 0.08, 1.0)
-                implot.setup_axis_limits(
-                    implot.ImAxis_.x1, min(angles), max(angles), implot.Cond_.always
+            if state.polar_radiation:
+                axis_flags = implot.AxisFlags_.no_decorations
+                implot.setup_axes("", "", axis_flags, axis_flags)
+                if state.fit_radiation:
+                    implot.setup_axis_limits(implot.ImAxis_.x1, -1.12, 1.12, implot.Cond_.always)
+                    implot.setup_axis_limits(implot.ImAxis_.y1, -1.12, 1.12, implot.Cond_.always)
+                    state.fit_radiation = False
+                circle_angles = tuple(range(0, 361, 3))
+                if state.normalized_gain:
+                    ring_step = 10.0
+                else:
+                    ring_step = 5.0 if radial_max - radial_min <= 25.0 else 10.0
+                ring_values = tuple(
+                    radial_min + ring_step * index
+                    for index in range(int(round((radial_max - radial_min) / ring_step)) + 1)
                 )
-                implot.setup_axis_limits(
-                    implot.ImAxis_.y1,
-                    min(gain) - padding,
-                    max(gain) + padding,
-                    implot.Cond_.always,
+                for ring_value in ring_values:
+                    radius = (ring_value - radial_min) / (radial_max - radial_min)
+                    ring = tuple(
+                        (radius * np.cos(np.deg2rad(angle)), radius * np.sin(np.deg2rad(angle)))
+                        for angle in circle_angles
+                    )
+                    plot_segment(f"##ring-{ring_value}", ring, (0.35, 0.39, 0.43, 0.65), 0.7)
+                    if radius > 0:
+                        implot.plot_text(
+                            f"{ring_value:g} {'dB' if state.normalized_gain else 'dBi'}",
+                            0.02,
+                            radius,
+                            imgui.ImVec2(4, 2),
+                        )
+                for spoke in range(0, 360, 30):
+                    radians = np.deg2rad(spoke)
+                    plot_segment(
+                        f"##spoke-{spoke}",
+                        ((0.0, 0.0), (np.sin(radians), np.cos(radians))),
+                        (0.30, 0.34, 0.38, 0.55),
+                        0.7,
+                    )
+                    label_radius = 1.075
+                    implot.plot_text(
+                        f"{spoke} deg",
+                        label_radius * np.sin(radians),
+                        label_radius * np.cos(radians),
+                    )
+                radii = tuple(
+                    max(0.0, min(1.0, (value - radial_min) / (radial_max - radial_min)))
+                    for value in display_gain
                 )
-                state.fit_radiation = False
-            plot_segment(
-                "Normalized gain" if state.normalized_gain else "Absolute gain",
-                tuple(zip(angles, gain)),
-                (0.2, 0.82, 1.0, 1.0),
-                2.5,
-            )
+                polar_points = tuple(
+                    (radius * np.sin(np.deg2rad(angle)), radius * np.cos(np.deg2rad(angle)))
+                    for angle, radius in zip(display_angles, radii)
+                )
+                if polar_points:
+                    polar_points += (polar_points[0],)
+                plot_segment(
+                    "Radiation pattern",
+                    polar_points,
+                    (0.15, 0.86, 1.0, 1.0),
+                    2.7,
+                )
+            else:
+                implot.setup_axes("Angle (deg)", "Gain (dB)")
+                if state.fit_radiation:
+                    padding = max((max(gain) - min(gain)) * 0.08, 1.0)
+                    implot.setup_axis_limits(
+                        implot.ImAxis_.x1, min(display_angles), max(display_angles), implot.Cond_.always
+                    )
+                    implot.setup_axis_limits(
+                        implot.ImAxis_.y1,
+                        min(display_gain) - padding,
+                        max(display_gain) + padding,
+                        implot.Cond_.always,
+                    )
+                    state.fit_radiation = False
+                plot_segment(
+                    "Normalized gain" if state.normalized_gain else "Absolute gain",
+                    tuple(zip(display_angles, display_gain)),
+                    (0.2, 0.82, 1.0, 1.0),
+                    2.5,
+                )
             if implot.is_plot_hovered():
                 mouse = implot.get_plot_mouse_pos()
-                imgui.set_tooltip(f"angle {mouse.x:.2f} deg\ngain {mouse.y:.2f} dB")
+                if state.polar_radiation:
+                    angle = math.degrees(math.atan2(mouse.x, mouse.y))
+                    radius = math.hypot(mouse.x, mouse.y)
+                    gain = radial_min + radius * (radial_max - radial_min)
+                    imgui.set_tooltip(f"angle {angle:.2f} deg\ngain {gain:.2f} dB")
+                else:
+                    imgui.set_tooltip(f"angle {mouse.x:.2f} deg\ngain {mouse.y:.2f} dB")
         finally:
             implot.end_plot()
 
+    def _draw_main_menu_bar(state: StudioState) -> float:
+        """Render the top main menu bar and return its height in pixels."""
+        menu_bar_height = imgui.get_frame_height()
+        if not imgui.begin_main_menu_bar():
+            return menu_bar_height
+
+        menu_bar_height = imgui.get_window_height()
+
+        io = imgui.get_io()
+        compile_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.b, False)
+        run_requested = imgui.is_key_pressed(imgui.Key.f5, False)
+        save_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.s, False)
+        open_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.o, False)
+        new_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.n, False)
+
+        if imgui.begin_menu("File"):
+            if imgui.menu_item("New", "Ctrl+N", False)[0] or new_requested:
+                state.new_file()
+            if imgui.menu_item("Open...", "Ctrl+O", False)[0] or open_requested:
+                state.open_dialog_path = str(state.source_path or "")
+                imgui.open_popup("Open Model")
+            if imgui.menu_item("Save", "Ctrl+S", False, state.source_path is not None)[0] or save_requested:
+                if state.source_path is not None:
+                    state.save()
+            if imgui.menu_item("Save As...", "Ctrl+Shift+S", False)[0]:
+                state.save_as_dialog_path = str(state.source_path or "")
+                imgui.open_popup("Save As")
+            imgui.separator()
+            if imgui.menu_item("Quit", "Alt+F4", False)[0]:
+                state.request_quit = True
+            imgui.end_menu()
+
+        if imgui.begin_menu("Edit"):
+            imgui.menu_item("Preferences", "", False, False)
+            imgui.end_menu()
+
+        if imgui.begin_menu("Simulate"):
+            if imgui.menu_item("Compile", "Ctrl+B", False)[0] or compile_requested:
+                state.compile_now()
+            if imgui.menu_item("Run", "F5", False)[0] or run_requested:
+                try:
+                    state.start_run()
+                except (ValueError, RuntimeError) as exc:
+                    state.diagnostics = (
+                        Diagnostic("J901", str(exc), state.diagnostics[0].span if state.diagnostics else _unknown_span()),
+                    )
+            if imgui.menu_item("Cancel", "", False, state.process is not None and state.process.poll() is None)[0]:
+                state.cancel_run()
+            imgui.end_menu()
+
+        if imgui.begin_menu("View"):
+            _, state.show_source_panel = imgui.menu_item("Source", "", state.show_source_panel)
+            _, state.show_solver_log_panel = imgui.menu_item("Solver Log", "", state.show_solver_log_panel)
+            _, state.show_build_panel = imgui.menu_item("Build Trace", "", state.show_build_panel)
+            _, state.show_geometry_panel = imgui.menu_item("Geometry", "", state.show_geometry_panel)
+            imgui.separator()
+            _, state.presentation_mode = imgui.menu_item("Presentation mode", "", state.presentation_mode)
+            imgui.end_menu()
+
+        if imgui.begin_menu("Help"):
+            if imgui.menu_item("About JAAM Studio", "", False)[0]:
+                state.about_open = True
+                imgui.open_popup("About JAAM Studio")
+            imgui.end_menu()
+
+        imgui.end_main_menu_bar()
+        return menu_bar_height
+
+
+    def _draw_modals(state: StudioState) -> None:
+        """Render modal popups triggered from the menu bar."""
+        if imgui.begin_popup_modal("Open Model", None)[0]:
+            imgui.text("Path to JAAM model")
+            _, state.open_dialog_path = imgui.input_text("##open-path", state.open_dialog_path, 1024)
+            if imgui.button("Open", imgui.ImVec2(120, 0)):
+                path = Path(state.open_dialog_path)
+                if path.exists():
+                    state.open_file(path)
+                    imgui.close_current_popup()
+                else:
+                    state.diagnostics = (
+                        Diagnostic("J902", f"file not found: {path}", _unknown_span()),
+                    )
+            imgui.same_line()
+            if imgui.button("Cancel", imgui.ImVec2(120, 0)):
+                imgui.close_current_popup()
+            imgui.end_popup()
+
+        if imgui.begin_popup_modal("Save As", None)[0]:
+            imgui.text("Save model as")
+            _, state.save_as_dialog_path = imgui.input_text("##save-as-path", state.save_as_dialog_path, 1024)
+            if imgui.button("Save", imgui.ImVec2(120, 0)):
+                path = Path(state.save_as_dialog_path)
+                try:
+                    state.save_as(path)
+                    imgui.close_current_popup()
+                except OSError as exc:
+                    state.diagnostics = (
+                        Diagnostic("J903", f"could not save: {exc}", _unknown_span()),
+                    )
+            imgui.same_line()
+            if imgui.button("Cancel", imgui.ImVec2(120, 0)):
+                imgui.close_current_popup()
+            imgui.end_popup()
+
+        if state.about_open and imgui.begin_popup_modal("About JAAM Studio", None)[0]:
+            imgui.text("JAAM Studio")
+            imgui.text_disabled("Just Another Antenna Modeller")
+            imgui.separator()
+            imgui.text("Version 0.1.0")
+            if imgui.button("OK", imgui.ImVec2(120, 0)):
+                state.about_open = False
+                imgui.close_current_popup()
+            imgui.end_popup()
+
+
     def gui() -> None:
+
         state.poll_solver_log()
         io = imgui.get_io()
+        menu_bar_height = _draw_main_menu_bar(state)
+
         width = max(float(io.display_size.x), 960.0)
         height = max(float(io.display_size.y), 640.0)
         margin = 12.0
@@ -354,100 +594,119 @@ def launch(path: Path | None = None) -> None:
         run_requested = imgui.is_key_pressed(imgui.Key.f5, False)
         save_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.s, False)
 
-        imgui.set_next_window_pos(imgui.ImVec2(margin, margin), imgui.Cond_.always)
-        imgui.set_next_window_size(
-            imgui.ImVec2(left_width - margin, source_height - margin), imgui.Cond_.always
-        )
-        imgui.begin("JAAM Source", flags=window_flags)
-        imgui.text_colored((0.30, 0.78, 1.0, 1.0), "JAAM STUDIO  /  SOURCE")
-        imgui.same_line()
-        imgui.text_disabled(str(state.source_path or "Untitled"))
-        imgui.separator()
-        changed, text = imgui.input_text_multiline(
-            "##source", state.source_text, imgui.ImVec2(-1, -1)
-        )
-        if changed:
-            state.source_text = text
-            state.last_edit = monotonic()
-        imgui.end()
+        top = margin + menu_bar_height
 
-        imgui.set_next_window_pos(imgui.ImVec2(margin, source_height + gap), imgui.Cond_.always)
-        imgui.set_next_window_size(
-            imgui.ImVec2(left_width - margin, height - source_height - gap - margin),
-            imgui.Cond_.always,
-        )
-        imgui.begin("Solver Log", flags=window_flags)
-        if not state.solver_log:
-            imgui.text_disabled("No live run yet. Save the model and press F5.")
-        for line in state.solver_log:
-            imgui.text_unformatted(line)
-        if state.process is not None:
-            status = "running" if state.process.poll() is None else f"exited {state.process.returncode}"
-            imgui.text(f"Solver: {status}")
-        imgui.end()
+        if state.show_source_panel:
+            imgui.set_next_window_pos(imgui.ImVec2(margin, top), imgui.Cond_.always)
+            imgui.set_next_window_size(
+                imgui.ImVec2(left_width - margin, source_height - margin), imgui.Cond_.always
+            )
+            imgui.begin("JAAM Source", flags=window_flags)
+            imgui.text_colored((0.30, 0.78, 1.0, 1.0), "JAAM STUDIO  /  SOURCE")
+            imgui.same_line()
+            imgui.text_disabled(str(state.source_path or "Untitled"))
+            imgui.separator()
+            changed, text = imgui.input_text_multiline(
+                "##source", state.source_text, imgui.ImVec2(-1, -1)
+            )
+            if changed:
+                state.source_text = text
+                state.last_edit = monotonic()
+            imgui.end()
+        else:
+            changed = False
 
-        imgui.set_next_window_pos(imgui.ImVec2(right_x, margin), imgui.Cond_.always)
-        imgui.set_next_window_size(
-            imgui.ImVec2(right_width, build_height - margin), imgui.Cond_.always
-        )
-        imgui.begin("Build / Pass Trace", flags=window_flags)
-        if imgui.button("Compile  Ctrl+B") or compile_requested:
-            state.compile_now()
-        imgui.same_line()
-        if imgui.button("Run  F5") or run_requested:
-            try:
-                state.start_run()
-            except (ValueError, RuntimeError) as exc:
-                state.diagnostics = (
-                    Diagnostic("J901", str(exc), state.diagnostics[0].span if state.diagnostics else _unknown_span()),
-                )
-        imgui.same_line()
-        if imgui.button("Cancel"):
-            state.cancel_run()
-        if save_requested and state.source_path is not None:
-            state.save()
-        _, state.presentation_mode = imgui.checkbox("Presentation mode", state.presentation_mode)
-        imgui.separator()
-        if state.compilation:
-            imgui.text_colored((0.35, 0.9, 0.5, 1.0), "COMPILE OK")
-            for compiler_pass in state.compilation.passes:
-                imgui.text(f"{compiler_pass.name}: {compiler_pass.duration_ns / 1e6:.3f} ms")
-        for diagnostic in state.diagnostics:
-            imgui.text_colored((1.0, 0.35, 0.25, 1.0), f"{diagnostic.code}: {diagnostic.message}")
-        imgui.end()
+        if state.show_solver_log_panel:
+            imgui.set_next_window_pos(imgui.ImVec2(margin, source_height + gap + top - margin), imgui.Cond_.always)
+            imgui.set_next_window_size(
+                imgui.ImVec2(left_width - margin, height - source_height - gap - top),
+                imgui.Cond_.always,
+            )
+            imgui.begin("Solver Log", flags=window_flags)
+            if not state.solver_log:
+                imgui.text_disabled("No live run yet. Save the model and press F5.")
+            for line in state.solver_log:
+                imgui.text_unformatted(line)
+            if state.process is not None:
+                status = "running" if state.process.poll() is None else f"exited {state.process.returncode}"
+                imgui.text(f"Solver: {status}")
+            imgui.end()
 
-        imgui.set_next_window_pos(imgui.ImVec2(right_x, build_height + gap), imgui.Cond_.always)
-        imgui.set_next_window_size(
-            imgui.ImVec2(right_width, height - build_height - gap - margin), imgui.Cond_.always
-        )
-        imgui.begin("Geometry / Mesh", flags=window_flags)
-        if imgui.radio_button("Geometry", state.active_visual == "geometry"):
-            state.active_visual = "geometry"
-        imgui.same_line()
-        if imgui.radio_button("Radiation cuts", state.active_visual == "radiation"):
-            state.active_visual = "radiation"
-        imgui.separator()
-        if state.compilation:
-            ir = state.compilation.ir
-            if state.active_visual == "geometry":
-                imgui.text_disabled(
-                    f"{len(ir.geometry)} primitives  |  mesh {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
-                )
-                geometry_plot()
-            else:
-                radiation_plot()
-        imgui.end()
+        if state.show_build_panel:
+            imgui.set_next_window_pos(imgui.ImVec2(right_x, top), imgui.Cond_.always)
+            imgui.set_next_window_size(
+                imgui.ImVec2(right_width, build_height - margin), imgui.Cond_.always
+            )
+            imgui.begin("Build / Pass Trace", flags=window_flags)
+            if imgui.button("Compile  Ctrl+B") or compile_requested:
+                state.compile_now()
+            imgui.same_line()
+            if imgui.button("Run  F5") or run_requested:
+                try:
+                    state.start_run()
+                except (ValueError, RuntimeError) as exc:
+                    state.diagnostics = (
+                        Diagnostic("J901", str(exc), state.diagnostics[0].span if state.diagnostics else _unknown_span()),
+                    )
+            imgui.same_line()
+            if imgui.button("Cancel"):
+                state.cancel_run()
+            if save_requested and state.source_path is not None:
+                state.save()
+            _, state.presentation_mode = imgui.checkbox("Presentation mode", state.presentation_mode)
+            imgui.separator()
+            if state.compilation:
+                imgui.text_colored((0.35, 0.9, 0.5, 1.0), "COMPILE OK")
+                for compiler_pass in state.compilation.passes:
+                    imgui.text(f"{compiler_pass.name}: {compiler_pass.duration_ns / 1e6:.3f} ms")
+            for diagnostic in state.diagnostics:
+                imgui.text_colored((1.0, 0.35, 0.25, 1.0), f"{diagnostic.code}: {diagnostic.message}")
+            imgui.end()
+
+        if state.show_geometry_panel:
+            imgui.set_next_window_pos(imgui.ImVec2(right_x, build_height + gap + top - margin), imgui.Cond_.always)
+            imgui.set_next_window_size(
+                imgui.ImVec2(right_width, height - build_height - gap - top), imgui.Cond_.always
+            )
+            imgui.begin("Geometry / Mesh", flags=window_flags)
+            if imgui.radio_button("Geometry", state.active_visual == "geometry"):
+                state.active_visual = "geometry"
+            imgui.same_line()
+            if imgui.radio_button("Radiation cuts", state.active_visual == "radiation"):
+                state.active_visual = "radiation"
+            imgui.separator()
+            if state.compilation:
+                ir = state.compilation.ir
+                if state.active_visual == "geometry":
+                    imgui.text_disabled(
+                        f"{len(ir.geometry)} primitives  |  mesh {len(ir.mesh.lines_x)-1} x {len(ir.mesh.lines_y)-1} x {len(ir.mesh.lines_z)-1}"
+                    )
+                    geometry_plot()
+                else:
+                    radiation_plot()
+            imgui.end()
+
+        _draw_modals(state)
 
         if changed is False and monotonic() - state.last_edit > 0.35:
             # Debounced checking; reset the timer far into the future until the next edit.
             state.compile_now()
             state.last_edit = float("inf")
 
+        if state.request_quit:
+            sys.exit(0)
+
     plot_context = implot.create_context()
     try:
         immapp.run(gui_function=gui, window_title="JAAM Studio — LIVE", window_size=(1440, 900))
     finally:
         implot.destroy_context(plot_context)
+
+
+def _unknown_span():
+    from .model import SourceSpan
+
+    return SourceSpan.unknown("<studio>")
 
 
 def _unknown_span():

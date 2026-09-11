@@ -11,3 +11,5 @@ jaam-out/
 *-out/
 JAAM_Studio*.ini
 midscene_run/
+.oxcode-memory/
+.oxcode/

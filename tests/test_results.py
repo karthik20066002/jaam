@@ -1,4 +1,10 @@
-from jaam.results import load_nf2ff
+from jaam.results import center_cut, load_nf2ff
+
+
+def test_center_cut_rotates_angles_without_changing_samples():
+    angles, values = center_cut((-180, -90, 0, 90, 180), (4, 1, -3, 1, 4), -180)
+    assert angles == (-180, -90, 0, 90, 180)
+    assert values == (-3, 1, 4, 1, -3)
 
 
 def test_load_radiation_pattern_and_extract_principal_cuts(tmp_path):
@@ -15,4 +21,4 @@ def test_load_radiation_pattern_and_extract_principal_cuts(tmp_path):
     assert angles == (-180, -90, 0, 90)
     assert gain[2] == 10
     elevation, _ = pattern.elevation_cut()
-    assert elevation == (-90, 0, 90)
+    assert elevation == (-180, -90, 0, 90, 180)
