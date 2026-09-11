@@ -4,8 +4,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
+import math
+
 from .diagnostics import Diagnostic
-from .ir import BoxOp, CurveOp, MeshSpec, RotPolyOp, SimulationIR, WireOp
+from .ir import BoxOp, CurveOp, FeedSpec, MeshSpec, Point3, RotPolyOp, SimulationIR, WireOp
 from .model import SourceSpan
 
 
@@ -173,4 +175,127 @@ class GradedMeshCoarseningPass(Pass):
         return kept
 
 
-DEFAULT_PASSES: PassList = (ValidateFeedsPass(), GradedMeshCoarseningPass())
+class MergeCollinearWiresPass(Pass):
+    """Merge adjacent collinear wire segments that share material and radius."""
+
+    name = "merge-collinear-wires"
+
+    # Tolerance for geometric collinearity and endpoint coincidence.
+    tolerance_m: float = 1e-9
+    # Minimum fraction of wavelength that a merged wire must span along its
+    # dominant axis, to avoid the endpoints rounding to the same mesh line.
+    min_length_fraction: float = 2.0 / 20.0
+
+    def run(self, ir: SimulationIR) -> PassResult:
+        from dataclasses import replace
+
+        wires = [op for op in ir.geometry if isinstance(op, (CurveOp, WireOp))]
+        others = [op for op in ir.geometry if not isinstance(op, (CurveOp, WireOp))]
+        wavelength = 299_792_458.0 / ir.frequency.center_hz
+        min_length = wavelength * self.min_length_fraction
+
+        merged = self._merge_wires(wires, min_length)
+        new_geometry = tuple(merged + others)
+        new_ir = replace(ir, geometry=new_geometry)
+
+        return PassResult(
+            new_ir,
+            statistics={
+                "original_wires": len(wires),
+                "merged_wires": len(merged),
+            },
+        )
+
+    def _merge_wires(self, wires: list[CurveOp | WireOp], min_length: float) -> list[CurveOp | WireOp]:
+        groups: dict[tuple[type, str, float], list[CurveOp | WireOp]] = {}
+        for wire in wires:
+            key = (type(wire), wire.material, wire.radius_m)
+            groups.setdefault(key, []).append(wire)
+
+        result: list[CurveOp | WireOp] = []
+        for group in groups.values():
+            result.extend(self._merge_group(group, min_length))
+        return result
+
+    def _merge_group(self, wires: list[CurveOp | WireOp], min_length: float) -> list[CurveOp | WireOp]:
+        remaining = list(wires)
+        changed = True
+        while changed and len(remaining) > 1:
+            changed = False
+            for i in range(len(remaining)):
+                for j in range(i + 1, len(remaining)):
+                    merged = self._try_merge(remaining[i], remaining[j], min_length)
+                    if merged is not None:
+                        remaining = [remaining[k] for k in range(len(remaining)) if k != i and k != j] + [merged]
+                        changed = True
+                        break
+                if changed:
+                    break
+        return remaining
+
+    def _try_merge(
+        self, a: CurveOp | WireOp, b: CurveOp | WireOp, min_length: float
+    ) -> CurveOp | WireOp | None:
+        if not self._collinear(a.points, b.points):
+            return None
+        merged_points = self._merge_points(a.points, b.points)
+        if merged_points is None:
+            return None
+        if self._dominant_span(merged_points) < min_length:
+            return None
+
+        if a.feed is not None and b.feed is not None:
+            return None
+        feed: FeedSpec | None = a.feed if a.feed is not None else b.feed
+        cls = type(a)
+        return cls(a.name, merged_points, a.material, a.radius_m, feed)
+
+    def _collinear(self, points_a: tuple[Point3, ...], points_b: tuple[Point3, ...]) -> bool:
+        if len(points_a) < 2 or len(points_b) < 2:
+            return False
+        dir_a = self._direction(points_a)
+        dir_b = self._direction(points_b)
+        if not self._parallel(dir_a, dir_b):
+            return False
+        vec = tuple(points_b[0][i] - points_a[0][i] for i in range(3))
+        return self._parallel(dir_a, vec)
+
+    @staticmethod
+    def _direction(points: tuple[Point3, ...]) -> tuple[float, float, float]:
+        start, stop = points[0], points[-1]
+        length = math.dist(start, stop)
+        if length < 1e-15:
+            return (0.0, 0.0, 0.0)
+        return tuple((stop[i] - start[i]) / length for i in range(3))
+
+    def _parallel(self, a: tuple[float, float, float], b: tuple[float, float, float]) -> bool:
+        cross = (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+        return math.hypot(*cross) <= self.tolerance_m
+
+    def _merge_points(
+        self, points_a: tuple[Point3, ...], points_b: tuple[Point3, ...]
+    ) -> tuple[Point3, ...] | None:
+        if self._close(points_a[-1], points_b[0]):
+            return points_a + points_b[1:]
+        if self._close(points_b[-1], points_a[0]):
+            return points_b + points_a[1:]
+        if self._close(points_a[-1], points_b[-1]):
+            return points_a + tuple(reversed(points_b))[1:]
+        if self._close(points_a[0], points_b[0]):
+            return tuple(reversed(points_a)) + points_b[1:]
+        return None
+
+    def _close(self, a: Point3, b: Point3) -> bool:
+        return math.dist(a, b) <= self.tolerance_m
+
+    @staticmethod
+    def _dominant_span(points: tuple[Point3, ...]) -> float:
+        spans = tuple(max(p[i] for p in points) - min(p[i] for p in points) for i in range(3))
+        return max(spans)
+
+
+DEFAULT_PASSES: PassList = (ValidateFeedsPass(), MergeCollinearWiresPass(), GradedMeshCoarseningPass())

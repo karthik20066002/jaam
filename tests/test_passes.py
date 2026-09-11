@@ -2,7 +2,7 @@ import pytest
 
 from jaam.compiler import compile_text, compile_text_result
 from jaam.frontend import parse_text
-from jaam.passes import GradedMeshCoarseningPass, ValidateFeedsPass
+from jaam.passes import GradedMeshCoarseningPass, MergeCollinearWiresPass, ValidateFeedsPass
 from jaam.semantics import analyze
 
 
@@ -19,6 +19,35 @@ def test_graded_mesh_coarsening_reduces_far_field_cells():
     # Geometry features should still be resolved.
     assert any(line == 0.0 for line in result.ir.mesh.lines_x)
     assert any(line == 0.0 for line in result.ir.mesh.lines_y)
+
+
+def test_merge_collinear_wires_combines_segments():
+    source = """
+    frequency 1GHz;
+    default { material: copper; radius: 1mm; }
+    wire a(path: line(from: (0,0,0), to: (0,0,5cm)));
+    wire b(path: line(from: (0,0,5cm), to: (0,0,10cm)));
+    """
+    ir = analyze(parse_text(source))
+    result = MergeCollinearWiresPass().run(ir)
+    assert result.statistics["merged_wires"] == 1
+    assert len(result.ir.geometry) == 1
+    assert result.ir.geometry[0].points[0] == pytest.approx((0, 0, 0))
+    assert result.ir.geometry[0].points[-1] == pytest.approx((0, 0, 0.1))
+
+
+def test_merge_collinear_wires_preserves_feed_boundary():
+    source = """
+    frequency 1GHz;
+    default { material: copper; radius: 1mm; }
+    wire a(path: line(from: (0,0,0), to: (0,0,5cm)), feed: port(impedance: 50ohm));
+    wire b(path: line(from: (0,0,5cm), to: (0,0,10cm)));
+    """
+    ir = analyze(parse_text(source))
+    result = MergeCollinearWiresPass().run(ir)
+    # The fed wire is split by _Analyzer; the segment after the feed merges with b.
+    assert result.statistics["merged_wires"] == 2
+    assert any(op.feed is not None for op in result.ir.geometry)
 
 
 def test_validate_feeds_pass_accepts_model_with_feed():
