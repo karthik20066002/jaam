@@ -8,6 +8,7 @@ from .diagnostics import Diagnostic
 from .frontend import parse_file, parse_text
 from .ir import SimulationIR
 from .model import PrimitiveDecl, Program, SourceSpan
+from .passes import DEFAULT_PASSES, PassResult
 from .semantics import analyze
 
 
@@ -38,6 +39,17 @@ def _compile(program: Program, parse_duration_ns: int) -> CompilationResult:
         passes.append(PassTrace(name, duration_ns, statistics))
 
     ir = analyze(program, trace=record)
+
+    diagnostics: list[Diagnostic] = []
+    for pass_ in DEFAULT_PASSES:
+        started = perf_counter_ns()
+        result = pass_.run(ir)
+        ir = result.ir
+        diagnostics.extend(result.diagnostics)
+        passes.append(PassTrace(pass_.name, perf_counter_ns() - started, result.statistics))
+        if result.diagnostics:
+            break
+
     declarations = {
         statement.name: statement.span
         for statement in program.statements
@@ -48,11 +60,11 @@ def _compile(program: Program, parse_duration_ns: int) -> CompilationResult:
         declaration_name = op.name.rsplit("__", 1)[0]
         if declaration_name in declarations:
             source_map[op.name] = declarations[declaration_name]
-    diagnostics = tuple(
+    diagnostics.extend(
         Diagnostic("J900", warning, SourceSpan.unknown(str(program.source or "<input>")), "warning")
         for warning in ir.warnings
     )
-    return CompilationResult(program, ir, diagnostics, source_map, tuple(passes))
+    return CompilationResult(program, ir, tuple(diagnostics), source_map, tuple(passes))
 
 
 def compile_text_result(source: str, *, filename: str = "<input>") -> CompilationResult:

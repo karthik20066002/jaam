@@ -64,7 +64,7 @@ def main():
         grid.SetLines(axis, lines)
         grid.SmoothMeshLines(axis, mesh["max_resolution_m"], ratio=mesh["grading_ratio"])
     if not ports:
-        raise SystemExit("S11 requires at least one feed port")
+        raise ValueError("S11 requires at least one feed port")
     out = Path(__file__).with_suffix("").with_name(Path(__file__).stem + "-out")
     out.mkdir(parents=True, exist_ok=True)
     fdtd.Run(str(out), cleanup=True)

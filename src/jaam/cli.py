@@ -82,6 +82,11 @@ def main(argv: list[str] | None = None) -> int:
         render_diagnostics(exc.diagnostics, fmt=args.format)
         return 1
 
+    errors = [item for item in result.diagnostics if item.severity == "error"]
+    if errors:
+        render_diagnostics(errors, fmt=args.format)
+        return 1
+
     if args.command == "inspect":
         if args.format == "json":
             print(json.dumps(compilation_to_dict(result), indent=2, sort_keys=True))
