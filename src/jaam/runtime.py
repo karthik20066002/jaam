@@ -26,6 +26,7 @@ class RunResult:
     nf2ff_csv: Path | None = None
     farfield_vtp: Path | None = None
     peak_gain_db: float | None = None
+    native_mesh_cells: tuple[int, int, int] = ()
 
 
 def _native_modules():
@@ -99,9 +100,12 @@ def build_native(ir: SimulationIR):
     return csx, fdtd, ports
 
 
-def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
+def run_simulation(ir: SimulationIR, output_dir: Path, *, farfield: bool = True) -> RunResult:
     np, _, _ = _native_modules()
-    _, fdtd, ports = build_native(ir)
+    csx, fdtd, ports = build_native(ir)
+    grid = csx.GetGrid()
+    # openEMS reports the line counts as its FDTD simulation dimensions.
+    native_mesh_cells = tuple(len(grid.GetLines(axis)) for axis in "xyz")
     if not ports:
         raise RuntimeError("S11 requires at least one feed port")
     if len(ports) > 1:
@@ -109,7 +113,7 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
             "multiple independently excited ports require separate simulations; "
             "this runtime currently supports exactly one feed"
         )
-    nf2ff = fdtd.CreateNF2FFBox()
+    nf2ff = fdtd.CreateNF2FFBox() if farfield else None
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "solver.log.jsonl"
 
@@ -158,6 +162,12 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
         csv_files.append(path)
         minima.append(float(np.min(db)))
         best_frequencies.append(float(frequencies[int(np.argmin(db))]))
+    if not farfield:
+        log("solver-complete", durationSeconds=solver_duration, bestFrequencyHz=best_frequencies[0], farfield=False)
+        return RunResult(
+            tuple(csv_files), tuple(minima), tuple(best_frequencies), solver_duration,
+            native_mesh_cells=native_mesh_cells,
+        )
     theta_deg = np.linspace(0.0, 180.0, 181)
     phi_deg = np.linspace(0.0, 360.0, 361)
     best_frequency = best_frequencies[0]
@@ -197,4 +207,5 @@ def run_simulation(ir: SimulationIR, output_dir: Path) -> RunResult:
         nf2ff_csv,
         farfield_vtp,
         peak_gain_db,
+        native_mesh_cells,
     )

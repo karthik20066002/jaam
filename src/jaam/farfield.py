@@ -7,8 +7,11 @@ from typing import Sequence
 
 
 def gain_surface_points(
-    theta_deg: Sequence[float], phi_deg: Sequence[float], gain_db: Sequence[Sequence[float]]
+    theta_deg: Sequence[float], phi_deg: Sequence[float], gain_db: Sequence[Sequence[float]],
+    *, radial_scale: str = "field",
 ) -> tuple[tuple[float, float, float], ...]:
+    if radial_scale not in ("field", "arrl", "db"):
+        raise ValueError(f"unknown radial scale: {radial_scale}")
     if len(gain_db) != len(theta_deg) or any(len(row) != len(phi_deg) for row in gain_db):
         raise ValueError("gain matrix shape must be theta by phi")
     peak = max((value for row in gain_db for value in row), default=0.0)
@@ -17,7 +20,15 @@ def gain_surface_points(
         polar = math.radians(theta)
         for phi, gain in zip(phi_deg, row):
             azimuth = math.radians(phi)
-            radius = 10 ** ((gain - peak) / 20)
+            delta = gain - peak
+            if radial_scale == "arrl":
+                # ARRL modified-log grid: each 3 dB step inward multiplies
+                # radius by 0.89 (ARRL Handbook, Coordinates for Patterns).
+                radius = 0.89 ** (-delta / 3.0)
+            elif radial_scale == "db":
+                radius = max(0.0, 1.0 + delta / 40.0)
+            else:
+                radius = 10 ** (delta / 20)
             points.append(
                 (
                     radius * math.sin(polar) * math.cos(azimuth),

@@ -472,6 +472,7 @@ dev = [
 studio = [
     { name = "imgui-bundle" },
     { name = "pyvista" },
+    { name = "vtk" },
 ]
 
 [package.metadata]
@@ -481,6 +482,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pyvista", marker = "extra == 'studio'", specifier = ">=0.45" },
+    { name = "vtk", marker = "extra == 'studio'", specifier = ">=9.3" },
 ]
 provides-extras = ["dev", "studio"]
 

@@ -1,0 +1,8 @@
+frequency 1GHz;
+boundary free_space;
+default { material: copper; radius: 1mm; }
+wire a(path: line(from: (0, 0, 0), to: (0, 0, 3cm)));
+wire b(path: line(from: (0, 0, 3cm), to: (0, 0, 6cm)), feed: port(impedance: 50ohm));
+wire c(path: line(from: (0, 0, 6cm), to: (0, 0, 9cm)));
+wire d(path: line(from: (0, 0, 9cm), to: (0, 0, 12cm)));
+concat joined(a, b, c, d);

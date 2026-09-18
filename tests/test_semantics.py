@@ -17,11 +17,12 @@ def test_semantic_pass_trace_is_ordered_and_measured():
     entries = []
     analyze(parse_text(source), trace=lambda name, duration, stats: entries.append((name, duration, stats)))
     assert [entry[0] for entry in entries] == [
-        "defaults-and-unit-resolution",
-        "path-and-composite-expansion",
-        "validation-and-constant-folding",
-        "dead-structure-elimination-and-deduplication",
+        "directives-and-defaults",
+        "geometry-expansion-and-unit-normalization",
+        "semantic-validation",
+        "dead-structure-elimination",
         "thin-and-thick-wire-lowering",
+        "exact-geometry-deduplication",
         "domain-and-mesh-construction",
     ]
     assert all(duration >= 0 for _, duration, _ in entries)

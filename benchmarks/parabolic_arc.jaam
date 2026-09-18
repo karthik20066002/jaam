@@ -1,0 +1,8 @@
+frequency 1GHz;
+boundary free_space;
+default { material: copper; radius: 1mm; }
+wire feeder(
+    path: line(from: (11.25cm, -3cm, -2cm), to: (11.25cm, -3cm, 0)),
+    feed: port(impedance: 50ohm)
+);
+wire arc(path: parabolic_arc(focal_length: 2mm, aperture: 6cm));

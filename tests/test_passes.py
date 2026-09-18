@@ -3,7 +3,9 @@ import pytest
 from jaam.compiler import compile_text, compile_text_result
 from jaam.frontend import parse_text
 from jaam.passes import (
+    CanonicalizeWireVerticesPass,
     GradedMeshCoarseningPass,
+    MeshAnchorPruningPass,
     MergeCollinearWiresPass,
     ValidateFeedsPass,
     ValidateMeshResolutionPass,
@@ -24,6 +26,38 @@ def test_graded_mesh_coarsening_reduces_far_field_cells():
     # Geometry features should still be resolved.
     assert any(line == 0.0 for line in result.ir.mesh.lines_x)
     assert any(line == 0.0 for line in result.ir.mesh.lines_y)
+
+
+def test_mesh_anchor_pruning_preserves_helix_geometry():
+    source = (
+        "frequency 1GHz; default { material:copper; radius:1mm; } "
+        "wire feeder(path:line(from:(2cm,0,-2cm),to:(2cm,0,0)),feed:port(impedance:50ohm)); "
+        "wire coil(path:helix(radius:2cm,pitch:2cm,turns:1));"
+    )
+    ir = analyze(parse_text(source))
+    graded = GradedMeshCoarseningPass().run(ir).ir
+    result = MeshAnchorPruningPass().run(graded)
+    assert result.statistics["applied"] == 1
+    assert result.statistics["anchors_removed"] > 0
+    assert result.ir.geometry == graded.geometry
+    assert sum(len(lines) for lines in (result.ir.mesh.lines_x, result.ir.mesh.lines_y, result.ir.mesh.lines_z)) < sum(
+        len(lines) for lines in (graded.mesh.lines_x, graded.mesh.lines_y, graded.mesh.lines_z)
+    )
+
+
+def test_vertex_canonicalization_keeps_feed_and_removes_straight_middle():
+    source = (
+        "frequency 1GHz; default { material:copper; radius:1mm; } "
+        "wire a(path:line(from:(0,0,0),to:(0,0,3cm))); "
+        "wire b(path:line(from:(0,0,3cm),to:(0,0,6cm)),feed:port(impedance:50ohm)); "
+        "wire c(path:line(from:(0,0,6cm),to:(0,0,9cm))); concat joined(a,b,c);"
+    )
+    ir = analyze(parse_text(source))
+    result = CanonicalizeWireVerticesPass().run(ir)
+    assert result.statistics["vertices_removed"] > 0
+    assert [op.feed for op in result.ir.geometry if hasattr(op, "feed")] == [
+        op.feed for op in ir.geometry if hasattr(op, "feed")
+    ]
 
 
 def test_validate_mesh_resolution_catches_small_feed_gap():

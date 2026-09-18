@@ -21,6 +21,7 @@ dev = [
 studio = [
   "imgui-bundle>=1.6",
   "pyvista>=0.45",
+  "vtk>=9.3",
 ]
 
 [project.scripts]

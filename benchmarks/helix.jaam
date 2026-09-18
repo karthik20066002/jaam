@@ -1,0 +1,8 @@
+frequency 1GHz;
+boundary free_space;
+default { material: copper; radius: 1mm; }
+wire feeder(
+    path: line(from: (2cm, 0, -2cm), to: (2cm, 0, 0)),
+    feed: port(impedance: 50ohm)
+);
+wire coil(path: helix(radius: 2cm, pitch: 2cm, turns: 1));

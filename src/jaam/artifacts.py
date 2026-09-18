@@ -52,6 +52,8 @@ def create_run_artifact(
             "passes": [asdict(item) for item in result.passes],
         },
         "mesh": {
+            "plannedCells": cell_counts,
+            "plannedTotalCells": cell_counts[0] * cell_counts[1] * cell_counts[2],
             "cells": cell_counts,
             "totalCells": cell_counts[0] * cell_counts[1] * cell_counts[2],
         },

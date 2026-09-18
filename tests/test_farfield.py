@@ -24,3 +24,20 @@ def test_farfield_serializers(tmp_path):
     piece = root.find("./PolyData/Piece")
     assert piece.attrib["NumberOfPoints"] == "9"
     assert piece.attrib["NumberOfPolys"] == "4"
+
+
+def test_arrl_grid_three_db_steps_and_cardinal_directions():
+    points = gain_surface_points((90,), (0, 90, 180, 270),
+                                ((2, -1, -4, -28),), radial_scale="arrl")
+    assert points[0] == pytest.approx((1, 0, 0))
+    assert points[1] == pytest.approx((0, 0.89, 0))
+    assert points[2] == pytest.approx((-0.89 ** 2, 0, 0))
+    assert points[3] == pytest.approx((0, -0.89 ** 10, 0))
+
+
+def test_db_display_floor_does_not_change_gain_samples():
+    gains = ((2, -18, -60),)
+    points = gain_surface_points((90,), (0, 90, 180), gains, radial_scale="db")
+    assert points[1] == pytest.approx((0, 0.5, 0))
+    assert points[2] == pytest.approx((0, 0, 0))
+    assert gains == ((2, -18, -60),)

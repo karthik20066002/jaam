@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TypeAlias
 
 import math
@@ -32,6 +32,137 @@ class Pass(ABC):
 
 
 PassList: TypeAlias = tuple[Pass, ...]
+
+
+class CanonicalizeWireVerticesPass(Pass):
+    """Remove redundant exact vertices without changing a conductor path."""
+
+    name = "canonicalize-wire-vertices"
+
+    def run(self, ir: SimulationIR) -> PassResult:
+        before = after = 0
+        geometry = []
+        for op in ir.geometry:
+            if not isinstance(op, (CurveOp, WireOp)):
+                geometry.append(op)
+                continue
+            before += len(op.points)
+            points = self._canonical_points(op.points, op.feed)
+            after += len(points)
+            geometry.append(replace(op, points=points))
+        return PassResult(
+            replace(ir, geometry=tuple(geometry)),
+            statistics={"vertices_before": before, "vertices_after": after, "vertices_removed": before - after},
+        )
+
+    @staticmethod
+    def _canonical_points(points: tuple[Point3, ...], feed: FeedSpec | None) -> tuple[Point3, ...]:
+        unique = []
+        for point in points:
+            if not unique or point != unique[-1]:
+                unique.append(point)
+        if len(unique) <= 2:
+            return tuple(unique)
+        protected = {feed.start, feed.stop} if feed else set()
+        result = [unique[0]]
+        for index in range(1, len(unique) - 1):
+            middle, stop = unique[index], unique[index + 1]
+            start = result[-1]
+            a = tuple(middle[i] - start[i] for i in range(3))
+            b = tuple(stop[i] - middle[i] for i in range(3))
+            cross = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+            if middle not in protected and cross == (0.0, 0.0, 0.0) and sum(a[i] * b[i] for i in range(3)) > 0:
+                continue
+            result.append(middle)
+        result.append(unique[-1])
+        return tuple(result)
+
+
+class MeshAnchorPruningPass(Pass):
+    """Keep simulation constraints while leaving curve tessellation in geometry."""
+
+    name = "mesh-anchor-pruning"
+
+    def run(self, ir: SimulationIR) -> PassResult:
+        detailed_curves = [
+            op for op in ir.geometry
+            if isinstance(op, (CurveOp, WireOp)) and len(op.points) >= 8
+        ]
+        if not detailed_curves:
+            return PassResult(ir, statistics={"applied": 0, "candidate_anchors": 0, "fixed_anchors": 0, "anchors_removed": 0})
+        max_res = ir.mesh.max_resolution_m
+        anchor_step = max_res / 3.0
+        hard: list[set[float]] = [{ir.domain_min[i], ir.domain_max[i]} for i in range(3)]
+        soft: list[set[float]] = [set() for _ in range(3)]
+        candidates: list[set[float]] = [set(axis) for axis in hard]
+
+        def add(point: Point3, target: list[set[float]]) -> None:
+            for axis in range(3):
+                target[axis].add(point[axis])
+
+        for op in ir.geometry:
+            if isinstance(op, (CurveOp, WireOp)):
+                for point in op.points:
+                    add(point, candidates)
+                structural = {op.points[0], op.points[-1]}
+                for axis in range(3):
+                    soft[axis].add(min(point[axis] for point in op.points))
+                    soft[axis].add(max(point[axis] for point in op.points))
+                    # One existing geometry sample per wavelength-resolution band.
+                    bands: dict[int, float] = {}
+                    for point in op.points:
+                        value = point[axis]
+                        band = math.floor(value / anchor_step)
+                        center = (band + 0.5) * anchor_step
+                        if band not in bands or abs(value - center) < abs(bands[band] - center):
+                            bands[band] = value
+                    soft[axis].update(bands.values())
+                for previous, middle, following in zip(op.points, op.points[1:], op.points[2:]):
+                    a = tuple(middle[i] - previous[i] for i in range(3))
+                    b = tuple(following[i] - middle[i] for i in range(3))
+                    denom = math.dist(previous, middle) * math.dist(middle, following)
+                    if denom and sum(a[i] * b[i] for i in range(3)) / denom < 0.866:
+                        structural.add(middle)
+                for point in structural:
+                    add(point, hard)
+                if isinstance(op, WireOp):
+                    for point in structural:
+                        for axis in range(3):
+                            hard[axis].update((point[axis] - op.radius_m, point[axis] + op.radius_m))
+                if op.feed:
+                    for point in (op.feed.start, op.feed.stop):
+                        add(point, hard)
+                        add(point, candidates)
+                    gap = tuple(op.feed.stop[i] - op.feed.start[i] for i in range(3))
+                    dominant = max(range(3), key=lambda i: abs(gap[i]))
+                    for third in (1, 2):
+                        value = op.feed.start[dominant] + gap[dominant] * third / 3.0
+                        hard[dominant].add(value)
+                        candidates[dominant].add(value)
+            elif isinstance(op, BoxOp):
+                for axis in range(3):
+                    for edge in (op.start[axis], op.stop[axis]):
+                        hard[axis].update((edge, edge - max_res / 3, edge + max_res / 3))
+                        candidates[axis].add(edge)
+            elif isinstance(op, RotPolyOp):
+                radius = max((math.hypot(p[0], p[1]) for p in op.points), default=0.0)
+                for axis in range(3):
+                    hard[axis].update((-radius, radius, op.elevation))
+                    candidates[axis].update((-radius, radius, op.elevation))
+
+        axes = [set(axis) for axis in hard]
+        for axis in range(3):
+            for value in sorted(soft[axis]):
+                if all(abs(value - fixed) >= max_res / 4 for fixed in axes[axis]):
+                    axes[axis].add(value)
+        lines = tuple(tuple(sorted({round(value, 12) for value in axis})) for axis in axes)
+        mesh = replace(ir.mesh, lines_x=lines[0], lines_y=lines[1], lines_z=lines[2])
+        before = sum(len({round(value, 12) for value in axis}) for axis in candidates)
+        after = sum(len(axis) for axis in lines)
+        return PassResult(
+            replace(ir, mesh=mesh),
+            statistics={"applied": 1, "candidate_anchors": before, "fixed_anchors": after, "anchors_removed": max(0, before - after)},
+        )
 
 
 class ValidateFeedsPass(Pass):
@@ -391,6 +522,7 @@ class ValidateMeshResolutionPass(Pass):
 
 DEFAULT_PASSES: PassList = (
     ValidateFeedsPass(),
+    CanonicalizeWireVerticesPass(),
     MergeCollinearWiresPass(),
     GradedMeshCoarseningPass(),
     ValidateMeshResolutionPass(),

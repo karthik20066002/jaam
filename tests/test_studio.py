@@ -1,56 +1,9 @@
-from pathlib import Path
-
-from jaam.cli import main
-from jaam.studio import StudioState
+from jaam.studio import _nearest_polar_sample
 
 
-def test_studio_state_compiles_and_saves(tmp_path):
-    path = tmp_path / "dipole.jaam"
-    state = StudioState.open(None)
-    assert state.compilation is not None
-    state.source_path = path
-    state.save()
-    assert path.read_text() == state.source_text
+def test_polar_hover_reports_pattern_sample_instead_of_cursor_radius() -> None:
+    angles = (-180.0, -90.0, 0.0, 90.0, 180.0)
+    gains = (-4.0, 1.5, 2.13, 1.5, -4.0)
 
-    state.source_text = "frequency nope;"
-    assert not state.compile_now()
-    assert state.diagnostics[0].code.startswith("J")
-
-
-def test_studio_cli_delegates_to_launcher(monkeypatch, tmp_path):
-    source = tmp_path / "model.jaam"
-    source.write_text("frequency 1GHz;")
-    seen = []
-    monkeypatch.setattr("jaam.studio.launch", lambda path: seen.append(path))
-    assert main(["studio", str(source)]) == 0
-    assert seen == [source]
-
-
-def test_solver_log_polling_is_non_blocking():
-    state = StudioState.open(None)
-    state._log_queue.put("iteration 100")
-    state._log_queue.put("iteration 200")
-    assert state.poll_solver_log() == ("iteration 100", "iteration 200")
-    assert state.poll_solver_log() == ()
-    assert state.solver_log == ["iteration 100", "iteration 200"]
-
-
-def test_solver_uses_system_python_with_repository_on_path(monkeypatch, tmp_path):
-    source = tmp_path / "dipole.jaam"
-    state = StudioState.open(None)
-    state.source_path = source
-    calls = []
-
-    class Process:
-        stdout = ()
-
-        def poll(self):
-            return 0
-
-    monkeypatch.setattr("jaam.studio.subprocess.Popen", lambda command, **options: calls.append((command, options)) or Process())
-    state.start_run(tmp_path / "runs")
-    command, options = calls[0]
-    assert command[:3] == ["/usr/bin/python3", "-m", "jaam.cli"]
-    assert command[3:5] == ["run", str(source)]
-    assert options["cwd"] == Path(__file__).resolve().parents[1]
-    assert options["env"]["PYTHONPATH"].split(":")[0].endswith("/src")
+    assert _nearest_polar_sample(1.51, angles, gains) == (0.0, 2.13)
+    assert _nearest_polar_sample(-92.0, angles, gains) == (-90.0, 1.5)

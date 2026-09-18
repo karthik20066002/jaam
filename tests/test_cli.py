@@ -58,3 +58,20 @@ def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
     assert all(item["outputs"]["farfield"] == "farfield.vtp" for item in manifests)
     assert all(item["solver"]["peakGainDb"] == 2.1 for item in manifests)
     assert "run " in capsys.readouterr().out
+
+
+def test_no_farfield_run_records_s11_only(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(ir, output_dir, *, farfield=True):
+        seen.append(farfield)
+        csv_path = output_dir / "port1_s11.csv"
+        csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+
+    monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--no-farfield"]) == 0
+    manifest = json.loads((next(tmp_path.iterdir()) / "manifest.json").read_text())
+    assert seen == [False]
+    assert manifest["outputs"]["ports"] == ["port1_s11.csv"]
+    assert "nf2ff" not in manifest["outputs"]

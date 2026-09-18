@@ -110,7 +110,7 @@ class _Analyzer:
         started = perf_counter_ns()
         frequency, boundary = self._directives()
         self._collect_defaults()
-        self._record("defaults-and-unit-resolution", started, defaults=len(self.global_defaults) + sum(map(len, self.type_defaults.values())))
+        self._record("directives-and-defaults", started, defaults=len(self.global_defaults) + sum(map(len, self.type_defaults.values())))
         if frequency is None:
             self._raise()
             raise AssertionError
@@ -119,13 +119,13 @@ class _Analyzer:
         for statement in self.program.statements:
             if isinstance(statement, PrimitiveDecl):
                 self._primitive(statement, wavelength)
-        self._record("path-and-composite-expansion", started, declarations=len(self.names), revolutions=len(self.rotations))
+        self._record("geometry-expansion-and-unit-normalization", started, declarations=len(self.names), revolutions=len(self.rotations))
         started = perf_counter_ns()
         self._raise()
-        self._record("validation-and-constant-folding", started, diagnostics=len(self.errors), warnings=len(self.warnings))
+        self._record("semantic-validation", started, diagnostics=len(self.errors), warnings=len(self.warnings))
 
         started = perf_counter_ns()
-        geometry: list[GeometryOp] = []
+        effective: list[_WireSource | _BoxSource] = []
         for source in self.names.values():
             if source.consumed:
                 continue
@@ -133,9 +133,19 @@ class _Analyzer:
                 if self._path_length(source.points) <= 1e-12:
                     self.warnings.append(f"dropped zero-length wire '{source.name}'")
                     continue
+            else:
+                if any(b <= a for a, b in zip(source.start, source.stop)):
+                    self.warnings.append(f"dropped degenerate box '{source.name}'")
+                    continue
+            effective.append(source)
+        self._record("dead-structure-elimination", started, effective_declarations=len(effective))
+
+        started = perf_counter_ns()
+        geometry: list[GeometryOp] = []
+        for source in effective:
+            if isinstance(source, _WireSource):
                 feed = self._make_feed(source, wavelength) if source.impedance is not None else None
-                ratio = source.radius / wavelength
-                cls = CurveOp if ratio < 0.02 else WireOp
+                cls = CurveOp if source.radius / wavelength < 0.02 else WireOp
                 if feed:
                     left, right = self._split_path(source.points, feed.start, feed.stop)
                     geometry.append(cls(f"{source.name}__a", left, source.material, source.radius, feed))
@@ -143,19 +153,17 @@ class _Analyzer:
                 else:
                     geometry.append(cls(source.name, source.points, source.material, source.radius, None))
             else:
-                if any(b <= a for a, b in zip(source.start, source.stop)):
-                    self.warnings.append(f"dropped degenerate box '{source.name}'")
-                    continue
                 geometry.append(BoxOp(source.name, source.start, source.stop, source.material))
         geometry.extend(self.rotations)
+        self._record("thin-and-thick-wire-lowering", started, thin_wires=sum(isinstance(op, CurveOp) for op in geometry), thick_wires=sum(isinstance(op, WireOp) for op in geometry))
+
+        started = perf_counter_ns()
         geometry = self._deduplicate(geometry)
         if not geometry:
             self.error("J220", "program contains no effective geometry", SourceSpan.unknown())
             self._raise()
-        self._record("dead-structure-elimination-and-deduplication", started, effective_primitives=len(geometry))
+        self._record("exact-geometry-deduplication", started, effective_primitives=len(geometry))
 
-        started = perf_counter_ns()
-        self._record("thin-and-thick-wire-lowering", started, thin_wires=sum(isinstance(op, CurveOp) for op in geometry), thick_wires=sum(isinstance(op, WireOp) for op in geometry))
         started = perf_counter_ns()
         domain_min, domain_max, geometry = self._domain(geometry, wavelength, boundary)
         mesh = self._mesh(geometry, domain_min, domain_max, wavelength)

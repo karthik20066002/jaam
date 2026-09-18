@@ -21,10 +21,12 @@ def _parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name)
         command.add_argument("source", type=Path)
         command.add_argument("--format", choices=("human", "json"), default="human")
+        command.add_argument("--optimize-mesh-anchors", action="store_true", help="experimental fixed-anchor pruning for tessellated curves")
         if name == "compile":
             command.add_argument("-o", "--output", type=Path)
         if name == "run":
             command.add_argument("--output-dir", type=Path)
+            command.add_argument("--no-farfield", action="store_true", help="skip NF2FF capture for faster S11 iteration")
     studio = subparsers.add_parser("studio")
     studio.add_argument("source", type=Path, nargs="?")
     doctor = subparsers.add_parser("doctor")
@@ -49,7 +51,7 @@ def _summary(ir: SimulationIR) -> str:
     return (
         f"frequency: {ir.frequency.lower_hz:g}..{ir.frequency.upper_hz:g} Hz\n"
         f"domain: {size[0]:.6g} x {size[1]:.6g} x {size[2]:.6g} m\n"
-        f"mesh: {cells[0]} x {cells[1]} x {cells[2]} cells; max {ir.mesh.max_resolution_m:.6g} m\n"
+        f"mesh plan: {cells[0]} x {cells[1]} x {cells[2]} intervals before native smoothing; max {ir.mesh.max_resolution_m:.6g} m\n"
         f"wires: {thin} thin, {thick} thick"
     )
 
@@ -61,8 +63,9 @@ def main(argv: list[str] | None = None) -> int:
 
         checks = finale_checks()
         for check in checks:
-            print(f"{'ok' if check.ok else 'FAIL':4}  {check.name}: {check.detail}")
-        return 0 if all(check.ok for check in checks) else 1
+            label = "ok" if check.ok else "FAIL" if check.required else "skip"
+            print(f"{label:4}  {check.name}: {check.detail}")
+        return 0 if all(check.ok for check in checks if check.required) else 1
     if args.command == "studio":
         try:
             from .studio import launch
@@ -73,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
     try:
-        result = compile_file_result(args.source)
+        result = compile_file_result(args.source, optimize_mesh_anchors=args.optimize_mesh_anchors)
         ir = result.ir
     except OSError as exc:
         print(f"jaam: {exc}", file=sys.stderr)
@@ -109,8 +112,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     artifact_root = args.output_dir or Path("jaam-out") / args.source.stem
     output_dir, manifest = create_run_artifact(artifact_root, args.source, result)
+    print(f"artifact: {output_dir}", flush=True)
     try:
-        run_result = run_simulation(ir, output_dir)
+        run_result = run_simulation(ir, output_dir, farfield=False) if args.no_farfield else run_simulation(ir, output_dir)
     except NativeDependencyError as exc:
         manifest.update(status="failed", error=str(exc))
         write_manifest(output_dir, manifest)
@@ -128,6 +132,11 @@ def main(argv: list[str] | None = None) -> int:
         "bestFrequencyHz": run_result.best_frequency_hz,
         "peakGainDb": run_result.peak_gain_db,
     }
+    if run_result.native_mesh_cells:
+        manifest["mesh"]["nativeCells"] = run_result.native_mesh_cells
+        manifest["mesh"]["nativeTotalCells"] = (
+            run_result.native_mesh_cells[0] * run_result.native_mesh_cells[1] * run_result.native_mesh_cells[2]
+        )
     manifest["outputs"]["ports"] = [path.name for path in run_result.csv_files]
     if run_result.nf2ff_csv:
         manifest["outputs"]["nf2ff"] = run_result.nf2ff_csv.name
