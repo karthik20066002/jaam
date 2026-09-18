@@ -18,6 +18,26 @@ def test_container_command_is_offline_and_mounts_artifacts(tmp_path):
     assert SOLVER_IMAGE in command
 
 
+def test_container_run_materializes_port_results_in_artifact_root(monkeypatch, tmp_path):
+    generated = tmp_path / "generated-out"
+    generated.mkdir()
+    (generated / "port1_s11.csv").write_text(
+        "frequency_hz,s11_db\n1000000000,-10\n", encoding="utf-8"
+    )
+    (generated / "nf2ff.csv").write_text(
+        "frequency_hz,theta_deg,phi_deg,gain_db\n1000000000,90,0,2\n", encoding="utf-8"
+    )
+
+    class Completed:
+        returncode = 0
+
+    monkeypatch.setattr("jaam.container.subprocess.run", lambda *args, **kwargs: Completed())
+    result = ContainerEngine("podman").run(tmp_path)
+    assert result.csv_files == (tmp_path / "port1_s11.csv",)
+    assert result.csv_files[0].read_text(encoding="utf-8").endswith("-10\n")
+    assert result.nf2ff_csv == tmp_path / "nf2ff.csv"
+
+
 def test_solve_command_uses_venv_python_and_mounts_artifacts(tmp_path):
     command = ContainerEngine("podman").solve_command(tmp_path)
     assert command[:4] == ["podman", "run", "--rm", "--network=none"]

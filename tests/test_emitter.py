@@ -12,5 +12,6 @@ def test_generated_python_is_deterministic_and_valid():
     assert first == second
     ast.parse(first)
     assert "AddLumpedPort" in first
+    assert "CreateNF2FFBox" in first
+    assert '"nf2ff.csv"' in first
     assert "port1_s11.csv" not in first  # filename remains parameterized by port index
-

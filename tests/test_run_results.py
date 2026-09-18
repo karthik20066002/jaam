@@ -41,6 +41,20 @@ def test_incomplete_manifest_cannot_be_shown_as_results(tmp_path):
         load_run_results(directory)
 
 
+def test_missing_artifact_output_has_actionable_error(tmp_path):
+    directory = _artifact(tmp_path)
+    (directory / "port1_s11.csv").unlink()
+    with pytest.raises(ValueError, match="artifact output is missing"):
+        load_run_results(directory)
+
+
+def test_save_as_creates_parent_directories(tmp_path):
+    state = StudioState.open(None)
+    path = tmp_path / "models" / "untitled.jaam"
+    state.save_as(path)
+    assert path.read_text() == state.source_text
+
+
 def test_studio_ignores_csv_paths_in_solver_log(tmp_path):
     state = StudioState.open(None)
     state._log_queue.put("port 1: min S11 -10 dB; /tmp/old/port1_s11.csv")

@@ -30,12 +30,18 @@ class RunResults:
 def _named_file(directory: Path, name: str) -> Path:
     if Path(name).name != name:
         raise ValueError(f"invalid artifact filename: {name}")
-    return directory / name
+    path = directory / name
+    if not path.is_file():
+        raise ValueError(f"artifact output is missing: {path}")
+    return path
 
 
 def load_run_results(directory: Path) -> RunResults:
     directory = directory.resolve()
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"artifact manifest is missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "complete":
         raise ValueError(f"run is {manifest.get('status', 'unknown')}")
     outputs = manifest["outputs"]

@@ -97,7 +97,21 @@ class ContainerEngine:
         duration = time.perf_counter() - start
 
         out_dir = artifact_dir / "generated-out"
-        csv_files = tuple(sorted(out_dir.glob("port*_s11.csv")))
+        # The generated program writes into generated-out/, but a run artifact
+        # is deliberately flat: its manifest names outputs by basename and the
+        # Studio loader resolves them from the artifact root. Materialize the
+        # container results there before returning them to the CLI.
+        csv_files = []
+        for generated_path in sorted(out_dir.glob("port*_s11.csv")):
+            artifact_path = artifact_dir / generated_path.name
+            shutil.copy2(generated_path, artifact_path)
+            csv_files.append(artifact_path)
+        csv_files = tuple(csv_files)
+        nf2ff_csv = None
+        generated_nf2ff = out_dir / "nf2ff.csv"
+        if generated_nf2ff.is_file():
+            nf2ff_csv = artifact_dir / generated_nf2ff.name
+            shutil.copy2(generated_nf2ff, nf2ff_csv)
 
         minima: list[float] = []
         best_freqs: list[float] = []
@@ -120,4 +134,5 @@ class ContainerEngine:
             minimum_s11_db=tuple(minima),
             best_frequency_hz=tuple(best_freqs),
             solver_duration_s=duration,
+            nf2ff_csv=nf2ff_csv,
         )

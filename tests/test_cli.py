@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 
 from jaam.cli import main
-from jaam.runtime import RunResult
+from jaam.runtime import NativeDependencyError, RunResult
 
 
 def test_check_command(capsys):
@@ -77,3 +77,16 @@ def test_no_farfield_run_records_s11_only(monkeypatch, tmp_path):
     assert seen == [False]
     assert manifest["outputs"]["ports"] == ["port1_s11.csv"]
     assert "nf2ff" not in manifest["outputs"]
+
+
+def test_container_is_used_only_if_native_solver_is_unavailable(monkeypatch, tmp_path):
+    def unavailable(*args, **kwargs):
+        raise NativeDependencyError("not installed")
+
+    csv_path = tmp_path / "port1_s11.csv"
+    csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+    fallback = RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+    monkeypatch.setattr("jaam.cli.run_simulation", unavailable)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: True)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.run", lambda self, output_dir: fallback)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path / "runs")]) == 0

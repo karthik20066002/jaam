@@ -39,6 +39,7 @@ def main():
     fdtd.SetGaussExcite(center, bandwidth)
     fdtd.SetBoundaryCond([SPEC["boundary"]] * 6)
     ports = []
+    port_impedances = []
     for op in SPEC["geometry"]:
         prop = props[op["material"]]
         kind = op["__kind__"]
@@ -57,6 +58,7 @@ def main():
             ports.append(fdtd.AddLumpedPort(len(ports) + 1, feed["impedance_ohm"],
                          feed["start"], feed["stop"], feed["direction"],
                          excite=1 if not ports else 0, priority=20))
+            port_impedances.append(feed["impedance_ohm"])
     grid = csx.GetGrid()
     grid.SetDeltaUnit(1.0)
     mesh = SPEC["mesh"]
@@ -65,8 +67,11 @@ def main():
         grid.SmoothMeshLines(axis, mesh["max_resolution_m"], ratio=mesh["grading_ratio"])
     if not ports:
         raise ValueError("S11 requires at least one feed port")
+    if len(ports) != 1:
+        raise ValueError("multiple independently excited ports require separate simulations")
     out = Path(__file__).with_suffix("").with_name(Path(__file__).stem + "-out")
     out.mkdir(parents=True, exist_ok=True)
+    nf2ff = fdtd.CreateNF2FFBox()
     fdtd.Run(str(out), cleanup=True)
     frequencies = (np.asarray([frequency["single_hz"]]) if frequency["single_hz"]
                    else np.linspace(frequency["lower_hz"], frequency["upper_hz"], 401))
@@ -76,13 +81,33 @@ def main():
         mag = np.abs(s11)
         db = 20 * np.log10(np.maximum(mag, 1e-300))
         vswr = np.where(mag < 1, (1 + mag) / (1 - mag), np.inf)
+        impedance = port_impedances[index - 1] * (1 + s11) / (1 - s11)
         path = out / f"port{{index}}_s11.csv"
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(("frequency_hz", "s11_real", "s11_imag", "s11_db", "vswr"))
-            writer.writerows((float(f), float(s.real), float(s.imag), float(d), float(v))
-                             for f, s, d, v in zip(frequencies, s11, db, vswr))
+            writer.writerow(("frequency_hz", "s11_real", "s11_imag", "s11_db", "vswr", "resistance_ohm", "reactance_ohm"))
+            writer.writerows((float(f), float(s.real), float(s.imag), float(d), float(v), float(z.real), float(z.imag))
+                             for f, s, d, v, z in zip(frequencies, s11, db, vswr, impedance))
         print(f"port {{index}}: min S11 {{float(np.min(db)):.2f}} dB; {{path}}")
+    best_frequency = float(frequencies[int(np.argmin(db))])
+    theta_deg = np.linspace(0.0, 180.0, 181)
+    phi_deg = np.linspace(0.0, 360.0, 361)
+    farfield = nf2ff.CalcNF2FF(str(out), best_frequency, theta_deg, phi_deg, read_cached=False)
+    magnitude = np.squeeze(np.asarray(farfield.E_norm, dtype=float))
+    expected = (len(theta_deg), len(phi_deg))
+    if magnitude.shape == expected[::-1]:
+        magnitude = magnitude.T
+    if magnitude.shape != expected:
+        raise RuntimeError(f"unexpected NF2FF matrix shape {{magnitude.shape}}; expected {{expected}}")
+    peak_gain_db = 10 * math.log10(max(float(np.ravel(np.asarray(farfield.Dmax))[0]), 1e-300))
+    gain_db = 20 * np.log10(np.maximum(magnitude / np.max(magnitude), 1e-300)) + peak_gain_db
+    with (out / "nf2ff.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("frequency_hz", "theta_deg", "phi_deg", "gain_db"))
+        for theta, row in zip(theta_deg, gain_db):
+            writer.writerows((best_frequency, float(theta), float(phi), float(gain))
+                             for phi, gain in zip(phi_deg, row))
+    print(f"nf2ff: {{out / 'nf2ff.csv'}}")
 
 
 if __name__ == "__main__":

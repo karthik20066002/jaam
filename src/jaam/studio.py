@@ -166,6 +166,7 @@ class StudioState:
     def save(self) -> None:
         if self.source_path is None:
             raise ValueError("choose a source path before saving")
+        self.source_path.parent.mkdir(parents=True, exist_ok=True)
         self.source_path.write_text(self.source_text, encoding="utf-8")
 
     def new_file(self) -> None:
@@ -179,6 +180,9 @@ class StudioState:
         self.compile_now()
 
     def save_as(self, path: Path) -> None:
+        path = path.expanduser()
+        if not path.name:
+            raise ValueError("choose a file name before saving")
         self.source_path = path
         self.save()
 
@@ -204,7 +208,7 @@ class StudioState:
             "run",
             str(self.source_path),
             "--output-dir",
-            str(output_root / self.source_path.stem),
+            str((repository / output_root / self.source_path.stem).resolve()),
         ]
         if self.optimize_mesh_anchors:
             full_command.append("--optimize-mesh-anchors")
@@ -803,9 +807,12 @@ def launch(path: Path | None = None) -> None:
             if imgui.menu_item("Open...", "Ctrl+O", False)[0] or open_requested:
                 state.open_dialog_path = str(state.source_path or "")
                 imgui.open_popup("Open Model")
-            if imgui.menu_item("Save", "Ctrl+S", False, state.source_path is not None)[0] or save_requested:
+            if imgui.menu_item("Save", "Ctrl+S", False)[0] or save_requested:
                 if state.source_path is not None:
                     state.save()
+                else:
+                    state.save_as_dialog_path = "untitled.jaam"
+                    imgui.open_popup("Save As")
             if imgui.menu_item("Save As...", "Ctrl+Shift+S", False)[0]:
                 state.save_as_dialog_path = str(state.source_path or "")
                 imgui.open_popup("Save As")

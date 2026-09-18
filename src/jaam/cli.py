@@ -116,22 +116,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"artifact: {output_dir}", flush=True)
     try:
         try:
-            engine = ContainerEngine.discover()
-            if engine.image_exists():
-                run_result = engine.run(output_dir)
-                solver_engine = engine.name
-            else:
-                run_result = run_simulation(
-                    ir, output_dir,
-                    farfield=False if args.no_farfield else True,
-                )
-                solver_engine = "host"
-        except (ContainerUnavailableError, FileNotFoundError):
+            # Prefer the native solver: it writes the full artifact contract
+            # (S11, impedance, NF2FF cuts and far-field mesh). The packaged
+            # generated script is retained as a dependency fallback.
             run_result = run_simulation(
                 ir, output_dir,
                 farfield=False if args.no_farfield else True,
             )
             solver_engine = "host"
+        except NativeDependencyError as native_error:
+            try:
+                engine = ContainerEngine.discover()
+                if not engine.image_exists():
+                    raise native_error
+                run_result = engine.run(output_dir)
+                solver_engine = engine.name
+            except (ContainerUnavailableError, FileNotFoundError):
+                raise native_error
     except NativeDependencyError as exc:
         manifest.update(status="failed", error=str(exc))
         write_manifest(output_dir, manifest)
