@@ -132,7 +132,7 @@ describe the fixed-line and smoothing relationship.
 | Fresh host dipole/Yagi run | Completed on 2026-09-16; about 8.1 s each |
 | Curved-anchor numerical parity | Open; parabolic benchmark drift measured above |
 | Hand-written host dipole comparison | Passed on matching frozen mesh: S11 0.0061 dB, impedance 0.033%, cuts 0.00012 dB maximum difference |
-| Pinned container image | Not yet built or connected |
+| Pinned container image | Image builds; `jaam run` connected |
 
 Run the suite with `./scripts/uv run --extra studio pytest`.
 
@@ -151,11 +151,12 @@ Podman and can generate equivalent Docker commands.
   chooser, and bidirectional picking remain open.
 - The native runtime rejects multiple feeds explicitly; separate port runs are
   not implemented yet.
-- The image definition exists, but `jaam run` still uses host bindings; container
-  execution is not connected to the runtime adapter yet.
 - The pinned image remains open. The hand-written dipole reference verifies
   geometry, native execution, and result processing against the same frozen
   mesh; independent mesh-generation accuracy still needs a separate study.
+- Container execution is connected to `jaam run`. When a built
+  `localhost/jaam-openems:7706743cc33f` image is present, runs use the
+  container; otherwise host bindings are used.
 
 Run `python3 benchmarks/dipole_reference.py` and then
 `PYTHONPATH=src python3 scripts/compare_dipole_reference.py JAAM_ARTIFACT REFERENCE_ARTIFACT`

@@ -39,7 +39,7 @@ def finale_checks() -> tuple[Check, ...]:
     )
     native = host.returncode == 0
     checks.append(Check("host solver bindings", native, host.stdout.strip() if native else host.stderr.strip() or "unavailable"))
-    checks.append(Check("solver execution", native or solver_image_available, "host bindings" if native else "pinned container image" if solver_image_available else "unavailable"))
+    checks.append(Check("solver execution", native or solver_image_available, "pinned container image" if solver_image_available else "host bindings" if native else "unavailable"))
     try:
         with tempfile.TemporaryDirectory(prefix="jaam-doctor-") as directory:
             probe = Path(directory) / "write-test"

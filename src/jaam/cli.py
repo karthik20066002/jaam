@@ -12,6 +12,7 @@ from .emitter import emit_python
 from .ir import CurveOp, SimulationIR, WireOp
 from .runtime import NativeDependencyError, run_simulation
 from .serialization import compilation_to_dict
+from .container import ContainerEngine, ContainerUnavailableError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -114,7 +115,23 @@ def main(argv: list[str] | None = None) -> int:
     output_dir, manifest = create_run_artifact(artifact_root, args.source, result)
     print(f"artifact: {output_dir}", flush=True)
     try:
-        run_result = run_simulation(ir, output_dir, farfield=False) if args.no_farfield else run_simulation(ir, output_dir)
+        try:
+            engine = ContainerEngine.discover()
+            if engine.image_exists():
+                run_result = engine.run(output_dir)
+                solver_engine = engine.name
+            else:
+                run_result = run_simulation(
+                    ir, output_dir,
+                    farfield=False if args.no_farfield else True,
+                )
+                solver_engine = "host"
+        except (ContainerUnavailableError, FileNotFoundError):
+            run_result = run_simulation(
+                ir, output_dir,
+                farfield=False if args.no_farfield else True,
+            )
+            solver_engine = "host"
     except NativeDependencyError as exc:
         manifest.update(status="failed", error=str(exc))
         write_manifest(output_dir, manifest)
@@ -131,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         "minimumS11Db": run_result.minimum_s11_db,
         "bestFrequencyHz": run_result.best_frequency_hz,
         "peakGainDb": run_result.peak_gain_db,
+        "engine": solver_engine,
     }
     if run_result.native_mesh_cells:
         manifest["mesh"]["nativeCells"] = run_result.native_mesh_cells

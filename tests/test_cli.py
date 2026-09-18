@@ -38,7 +38,7 @@ def test_inspect_command_json(capsys):
 
 
 def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
-    def fake_run(ir, output_dir):
+    def fake_run(ir, output_dir, **kwargs):
         csv_path = output_dir / "port1_s11.csv"
         csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
         nf2ff = output_dir / "nf2ff.csv"
@@ -48,6 +48,7 @@ def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
         return RunResult((csv_path,), (-10.0,), (1.0,), 0.25, nf2ff, farfield, 2.1)
 
     monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
     assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path)]) == 0
     assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path)]) == 0
     runs = sorted(tmp_path.iterdir())
@@ -70,6 +71,7 @@ def test_no_farfield_run_records_s11_only(monkeypatch, tmp_path):
         return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
 
     monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
     assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--no-farfield"]) == 0
     manifest = json.loads((next(tmp_path.iterdir()) / "manifest.json").read_text())
     assert seen == [False]

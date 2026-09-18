@@ -18,6 +18,20 @@ def test_container_command_is_offline_and_mounts_artifacts(tmp_path):
     assert SOLVER_IMAGE in command
 
 
+def test_solve_command_uses_venv_python_and_mounts_artifacts(tmp_path):
+    command = ContainerEngine("podman").solve_command(tmp_path)
+    assert command[:4] == ["podman", "run", "--rm", "--network=none"]
+    assert f"{tmp_path.resolve()}:/work:Z" in command
+    assert SOLVER_IMAGE in command
+    assert "/opt/openEMS/venv/bin/python3" in command
+    assert "/work/generated.py" in command
+
+
+def test_solve_command_accepts_custom_script(tmp_path):
+    command = ContainerEngine("podman").solve_command(tmp_path, script="solve.py")
+    assert "/work/solve.py" in command
+
+
 def test_finale_doctor_returns_named_checks(monkeypatch):
     monkeypatch.setattr("jaam.doctor.ContainerEngine.discover", classmethod(lambda cls: ContainerEngine("true")))
     names = {check.name for check in finale_checks()}
