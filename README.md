@@ -270,6 +270,14 @@ describe the fixed-line and smoothing relationship this section relies on.
 
 Run the suite with `./scripts/uv run --extra studio pytest`.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs ruff (`E4,E7,E9,F`, see `[tool.ruff]` in
+`pyproject.toml`), the full pytest suite with all extras, then builds a
+self-contained Linux `jaam` CLI binary with PyInstaller and smoke-tests it
+with `jaam check examples/dipole.jaam`. Every build uploads the binary as a
+CI artifact; pushing a tag additionally attaches it to a GitHub release.
+
 ## Reproducibility
 
 Host dependencies are locked by `uv.lock`. The Ubuntu 24.04 image pins the

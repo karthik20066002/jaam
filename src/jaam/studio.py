@@ -18,7 +18,7 @@ import numpy as np
 from .compiler import CompilationResult, compile_text_result
 from .passes import BACKEND_PASS_NOTES, PASS_DESCRIPTIONS
 from .diagnostics import CompilationError, Diagnostic
-from .ir import BoxOp, CurveOp, SimulationIR, WireOp
+from .ir import CurveOp, SimulationIR, WireOp
 from .plots import project_geometry
 from .plots import front_to_back_ratio, half_power_beamwidth, normalize_gain
 from .results import RadiationPattern, center_cut
@@ -1139,9 +1139,7 @@ def launch(path: Path | None = None) -> None:
         right_width = width - right_x - margin
         source_height = height * 0.68
         build_height = height * 0.43
-        window_flags = imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_move
         popout_flags = imgui.WindowFlags_.no_collapse
-        layout_condition = imgui.Cond_.always
 
         top = margin + menu_bar_height
 

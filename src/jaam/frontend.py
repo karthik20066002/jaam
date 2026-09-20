@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from antlr4 import CommonTokenStream, FileStream, InputStream
+from antlr4 import CommonTokenStream, InputStream
 from antlr4.error.ErrorListener import ErrorListener
 
 from .diagnostics import CompilationError, Diagnostic

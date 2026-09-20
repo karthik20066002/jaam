@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Iterable, Literal, Sequence
 
-from .ir import BoxOp, CurveOp, GeometryOp, Point3, RotPolyOp, WireOp
+from .ir import BoxOp, CurveOp, GeometryOp, Point3, WireOp
 
 Plane = Literal["xy", "xz", "yz"]
 _PLANE_AXES = {"xy": (0, 1, 2), "xz": (0, 2, 1), "yz": (1, 2, 0)}

@@ -1,4 +1,3 @@
-from pathlib import Path
 import json
 
 from jaam.cli import main

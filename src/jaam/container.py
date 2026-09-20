@@ -105,7 +105,7 @@ class ContainerEngine:
     def run(self, artifact_dir: Path, script: str = "generated.py") -> ContainerRunResult:
         """Execute generated.py inside the container and parse S11 results."""
         start = time.perf_counter()
-        completed = subprocess.run(
+        subprocess.run(
             self.solve_command(artifact_dir, script),
             cwd=artifact_dir,
             capture_output=True,

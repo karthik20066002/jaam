@@ -6,13 +6,9 @@ optional ``studio`` dependency extra.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .compiler import CompilationResult
-from .ir import BoxOp, CurveOp, RotPolyOp, WireOp
-
-if TYPE_CHECKING:
-    import pyvista as pv
+from .ir import BoxOp, CurveOp, WireOp
 
 
 class StudioDependencyError(RuntimeError):

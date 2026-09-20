@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 import math
 import re
 from time import perf_counter_ns
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Sequence
 
 from .diagnostics import CompilationError, Diagnostic
 from .ir import (
@@ -21,7 +21,6 @@ from .ir import (
     WireOp,
 )
 from .model import (
-    Argument,
     CallExpr,
     DefaultBlock,
     Directive,

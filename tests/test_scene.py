@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-pv = pytest.importorskip("pyvista")
-
 from jaam.compiler import compile_file_result
 from jaam.scene import build_scene, save_scene_vtm
+
+pv = pytest.importorskip("pyvista")
 
 
 def test_scene_contains_geometry_domain_feed_and_metadata(tmp_path):

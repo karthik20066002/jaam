@@ -9,8 +9,6 @@ intentional).
 """
 from __future__ import annotations
 
-import math
-
 from jaam.ir import FeedSpec, WireOp
 from jaam.mesh_features import fdtd_feature_axes
 
