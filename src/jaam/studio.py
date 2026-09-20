@@ -16,6 +16,7 @@ from time import monotonic
 import numpy as np
 
 from .compiler import CompilationResult, compile_text_result
+from .passes import BACKEND_PASS_NOTES, PASS_DESCRIPTIONS
 from .diagnostics import CompilationError, Diagnostic
 from .ir import BoxOp, CurveOp, SimulationIR, WireOp
 from .plots import project_geometry
@@ -24,6 +25,20 @@ from .results import RadiationPattern, center_cut
 from .run_results import RunResults, load_run_results
 
 _ARTIFACT_RESULT = "artifact: "
+_JAAM_FILE_FILTERS = ["JAAM models", "*.jaam", "All files", "*"]
+
+
+def start_native_file_dialog(kind: str, default_path: str) -> Any:
+    """Open the OS file picker. Raises if the native dialog cannot start."""
+    from imgui_bundle import portable_file_dialogs as pfd
+
+    if kind == "open":
+        return pfd.open_file("Open Model", default_path, _JAAM_FILE_FILTERS)
+    if kind == "save":
+        return pfd.save_file("Save Model", default_path, _JAAM_FILE_FILTERS)
+    if kind == "results":
+        return pfd.select_folder("Open Results", default_path)
+    raise ValueError(f"unknown native dialog {kind!r}")
 
 
 STARTER_SOURCE = """frequency 1GHz;
@@ -63,15 +78,17 @@ def _render_3d_frame(
     radial_scale: str = "arrl",
     pattern_grid: bool = True,
     pattern_structure: bool = False,
+    surface_mesh: Path | None = None,
 ) -> np.ndarray:
     global _VIZ3D_RENDERER
     from .viz3d import AntennaViz3D
 
     if _VIZ3D_RENDERER is None:
-        _VIZ3D_RENDERER = AntennaViz3D(ir, show_mesh=show_mesh)
+        _VIZ3D_RENDERER = AntennaViz3D(ir, show_mesh=show_mesh, surface_mesh=surface_mesh)
     else:
         if _VIZ3D_RENDERER._ir != ir:
             _VIZ3D_RENDERER.update_ir(ir)
+        _VIZ3D_RENDERER.set_surface_mesh(surface_mesh)
         _VIZ3D_RENDERER.set_show_mesh(show_mesh)
     _VIZ3D_RENDERER.set_pattern_style(radial_scale, pattern_grid, pattern_structure)
     _VIZ3D_RENDERER.set_radiation_pattern(radiation)
@@ -93,6 +110,8 @@ class StudioState:
     show_feed: bool = True
     fit_geometry: bool = True
     optimize_mesh_anchors: bool = False
+    solver_backend: str = "openems"
+    farfield_quality: str = "preview"
     active_visual: str = "geometry"
     radiation_cut: str = "e"
     normalized_gain: bool = True
@@ -124,7 +143,11 @@ class StudioState:
     save_as_dialog_path: str = ""
     results_dialog_path: str = ""
     about_open: bool = False
+    pending_popup: str | None = None
+    editor_generation: int = 0
     request_quit: bool = False
+    _native_dialog: Any = field(default=None, repr=False)
+    _native_dialog_kind: str | None = field(default=None, repr=False)
     solver_log: list[str] = field(default_factory=list)
     _log_queue: Queue[str] = field(default_factory=Queue, repr=False)
     _reader: Thread | None = field(default=None, repr=False)
@@ -153,6 +176,7 @@ class StudioState:
             self.compilation = compile_text_result(
                 self.source_text, filename=str(self.source_path or "<studio>"),
                 optimize_mesh_anchors=self.optimize_mesh_anchors,
+                backend=self.solver_backend,
             )
             self.diagnostics = self.compilation.diagnostics
             self._viz3d_texture_ir = None
@@ -172,11 +196,13 @@ class StudioState:
     def new_file(self) -> None:
         self.source_path = None
         self.source_text = STARTER_SOURCE
+        self.editor_generation += 1
         self.compile_now()
 
     def open_file(self, path: Path) -> None:
         self.source_path = path
         self.source_text = path.read_text(encoding="utf-8")
+        self.editor_generation += 1
         self.compile_now()
 
     def save_as(self, path: Path) -> None:
@@ -186,17 +212,93 @@ class StudioState:
         self.source_path = path
         self.save()
 
+    def request_open_dialog(self) -> None:
+        if self._try_native_dialog("open", str(self.source_path or Path.cwd())):
+            return
+        self._fallback_open_dialog()
+
+    def request_save(self) -> None:
+        if self.source_path is not None:
+            self.save()
+            return
+        self.request_save_as_dialog()
+
+    def request_save_as_dialog(self) -> None:
+        default = str(self.source_path or (Path.cwd() / "untitled.jaam"))
+        if self._try_native_dialog("save", default):
+            return
+        self._fallback_save_as_dialog()
+
+    def request_open_results_dialog(self) -> None:
+        default = str(self.artifact_dir or Path.cwd())
+        if self._try_native_dialog("results", default):
+            return
+        self._fallback_open_results_dialog()
+
+    def request_about(self) -> None:
+        self.about_open = True
+        self.pending_popup = "About JAAM Studio"
+
+    def _try_native_dialog(self, kind: str, default_path: str) -> bool:
+        if self._native_dialog is not None:
+            return True
+        try:
+            self._native_dialog = start_native_file_dialog(kind, default_path)
+            self._native_dialog_kind = kind
+            return True
+        except Exception:
+            self._native_dialog = None
+            self._native_dialog_kind = None
+            return False
+
+    def _fallback_open_dialog(self) -> None:
+        self.open_dialog_path = str(self.source_path or "")
+        self.pending_popup = "Open Model"
+
+    def _fallback_save_as_dialog(self) -> None:
+        self.save_as_dialog_path = str(self.source_path or "untitled.jaam")
+        self.pending_popup = "Save As"
+
+    def _fallback_open_results_dialog(self) -> None:
+        self.results_dialog_path = str(self.artifact_dir or "")
+        self.pending_popup = "Open Results"
+
+    def apply_native_dialog_result(self, kind: str | None, result: str | list[str] | None) -> None:
+        if kind is None or not result:
+            return
+        selected = result[0] if isinstance(result, list) else result
+        path = Path(selected).expanduser()
+        if kind == "open":
+            try:
+                self.open_file(path)
+            except OSError as exc:
+                self.diagnostics = (Diagnostic("J902", f"could not open: {exc}", _unknown_span()),)
+            return
+        if kind == "save":
+            if path.suffix == "":
+                path = path.with_suffix(".jaam")
+            try:
+                self.save_as(path)
+            except (OSError, ValueError) as exc:
+                self.diagnostics = (Diagnostic("J903", f"could not save: {exc}", _unknown_span()),)
+            return
+        if kind == "results":
+            try:
+                self.load_artifact(path)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.radiation_error = str(exc)
+
     def start_run(self, output_root: Path = Path("jaam-out")) -> None:
         if self.process is not None and self.process.poll() is None:
             raise RuntimeError("a solver run is already active")
         if self._reader is not None and self._reader.is_alive():
             raise RuntimeError("previous solver log is still finishing")
         if self.source_path is None:
-            raise ValueError("save the source before running openEMS")
+            raise ValueError("save the source before running the solver")
         self.save()
         repository = Path(__file__).resolve().parents[2]
-        # openEMS is packaged for the host interpreter. Keep Studio itself in
-        # uv, but deliberately execute simulations with the system Python.
+        # Host solver bindings (openEMS or Palace) live on the system
+        # interpreter. Keep Studio itself in uv.
         command = ["/usr/bin/python3", "-m", "jaam.cli"]
         environment = os.environ.copy()
         source_root = str(repository / "src")
@@ -209,6 +311,10 @@ class StudioState:
             str(self.source_path),
             "--output-dir",
             str((repository / output_root / self.source_path.stem).resolve()),
+            "--backend",
+            self.solver_backend,
+            "--farfield",
+            self.farfield_quality,
         ]
         if self.optimize_mesh_anchors:
             full_command.append("--optimize-mesh-anchors")
@@ -356,6 +462,11 @@ class StudioState:
 
             ir = self.compilation.ir
             radiation = self.radiation if self.show_3d_radiation else None
+            surface_mesh = None
+            if self.artifact_dir is not None:
+                candidate = self.artifact_dir / "model.msh"
+                if candidate.is_file():
+                    surface_mesh = candidate
             view = (
                 self._viz3d_azimuth,
                 self._viz3d_elevation,
@@ -365,6 +476,7 @@ class StudioState:
                 self.radial_scale,
                 self.pattern_grid,
                 self.pattern_structure,
+                surface_mesh,
             )
             render_width, render_height = width, height
             frame_key = (ir, render_width, render_height, *view)
@@ -393,6 +505,7 @@ class StudioState:
                         self.radial_scale,
                         self.pattern_grid,
                         self.pattern_structure,
+                        surface_mesh,
                     )
                 if self._viz3d_future.done():
                     completed_key = self._viz3d_future_key
@@ -794,31 +907,17 @@ def launch(path: Path | None = None) -> None:
 
         menu_bar_height = imgui.get_window_height()
 
-        io = imgui.get_io()
-        compile_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.b, False)
-        run_requested = imgui.is_key_pressed(imgui.Key.f5, False)
-        save_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.s, False)
-        open_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.o, False)
-        new_requested = io.key_ctrl and imgui.is_key_pressed(imgui.Key.n, False)
-
         if imgui.begin_menu("File"):
-            if imgui.menu_item("New", "Ctrl+N", False)[0] or new_requested:
+            if imgui.menu_item("New", "Ctrl+N", False)[0]:
                 state.new_file()
-            if imgui.menu_item("Open...", "Ctrl+O", False)[0] or open_requested:
-                state.open_dialog_path = str(state.source_path or "")
-                imgui.open_popup("Open Model")
-            if imgui.menu_item("Save", "Ctrl+S", False)[0] or save_requested:
-                if state.source_path is not None:
-                    state.save()
-                else:
-                    state.save_as_dialog_path = "untitled.jaam"
-                    imgui.open_popup("Save As")
+            if imgui.menu_item("Open...", "Ctrl+O", False)[0]:
+                state.request_open_dialog()
+            if imgui.menu_item("Save", "Ctrl+S", False)[0]:
+                state.request_save()
             if imgui.menu_item("Save As...", "Ctrl+Shift+S", False)[0]:
-                state.save_as_dialog_path = str(state.source_path or "")
-                imgui.open_popup("Save As")
+                state.request_save_as_dialog()
             if imgui.menu_item("Open Results...", "", False)[0]:
-                state.results_dialog_path = str(state.artifact_dir or "")
-                imgui.open_popup("Open Results")
+                state.request_open_results_dialog()
             imgui.separator()
             if imgui.menu_item("Quit", "Alt+F4", False)[0]:
                 state.request_quit = True
@@ -829,9 +928,9 @@ def launch(path: Path | None = None) -> None:
             imgui.end_menu()
 
         if imgui.begin_menu("Simulate"):
-            if imgui.menu_item("Compile", "Ctrl+B", False)[0] or compile_requested:
+            if imgui.menu_item("Compile", "Ctrl+B", False)[0]:
                 state.compile_now()
-            if imgui.menu_item("Run", "F5", False)[0] or run_requested:
+            if imgui.menu_item("Run", "F5", False)[0]:
                 try:
                     state.start_run()
                 except (ValueError, RuntimeError) as exc:
@@ -840,11 +939,32 @@ def launch(path: Path | None = None) -> None:
                     )
             if imgui.menu_item("Cancel", "", False, state.process is not None and state.process.poll() is None)[0]:
                 state.cancel_run()
-            changed, state.optimize_mesh_anchors = imgui.menu_item(
-                "Experimental mesh anchors", "", state.optimize_mesh_anchors
-            )
-            if changed:
-                state.compile_now()
+            if state.solver_backend == "openems":
+                changed, state.optimize_mesh_anchors = imgui.menu_item(
+                    "Experimental mesh anchors", "", state.optimize_mesh_anchors
+                )
+                if changed:
+                    state.compile_now()
+            imgui.separator()
+            imgui.text_disabled("Far field")
+            for quality, label in (("off", "Off (S11 only)"), ("preview", "Preview"), ("full", "Full")):
+                selected = state.farfield_quality == quality
+                clicked, selected = imgui.menu_item(label + "##ff", "", selected)
+                if clicked and selected:
+                    state.farfield_quality = quality
+            imgui.separator()
+            imgui.text_disabled("Backend")
+            for name, label in (
+                ("openems", "openEMS (FDTD)"),
+                ("palace", "Palace (FEM)"),
+                ("meep", "Meep (FDTD)"),
+                ("scuff", "SCUFF-EM (BEM)"),
+            ):
+                selected = state.solver_backend == name
+                clicked, selected = imgui.menu_item(label, "", selected)
+                if clicked and selected and state.solver_backend != name:
+                    state.solver_backend = name
+                    state.compile_now()
             imgui.end_menu()
 
         if imgui.begin_menu("View"):
@@ -876,21 +996,72 @@ def launch(path: Path | None = None) -> None:
 
         if imgui.begin_menu("Help"):
             if imgui.menu_item("About JAAM Studio", "", False)[0]:
-                state.about_open = True
-                imgui.open_popup("About JAAM Studio")
+                state.request_about()
             imgui.end_menu()
 
         imgui.end_main_menu_bar()
         return menu_bar_height
 
 
+    def _handle_studio_shortcuts(state: StudioState) -> None:
+        if imgui.is_popup_open("", imgui.PopupFlags_.any_popup) or state._native_dialog is not None:
+            return
+        io = imgui.get_io()
+        ctrl = bool(io.key_ctrl)
+        shift = bool(io.key_shift)
+        if ctrl and not shift and imgui.is_key_pressed(imgui.Key.n, False):
+            state.new_file()
+        elif ctrl and not shift and imgui.is_key_pressed(imgui.Key.o, False):
+            state.request_open_dialog()
+        elif ctrl and shift and imgui.is_key_pressed(imgui.Key.s, False):
+            state.request_save_as_dialog()
+        elif ctrl and not shift and imgui.is_key_pressed(imgui.Key.s, False):
+            state.request_save()
+        elif ctrl and not shift and imgui.is_key_pressed(imgui.Key.b, False):
+            state.compile_now()
+        elif imgui.is_key_pressed(imgui.Key.f5, False):
+            try:
+                state.start_run()
+            except (ValueError, RuntimeError) as exc:
+                state.diagnostics = (
+                    Diagnostic("J901", str(exc), state.diagnostics[0].span if state.diagnostics else _unknown_span()),
+                )
+
+    def _poll_native_dialog(state: StudioState) -> None:
+        dialog = state._native_dialog
+        if dialog is None:
+            return
+        kind = state._native_dialog_kind
+        try:
+            if not dialog.ready(0):
+                return
+            result = dialog.result()
+        except Exception:
+            state._native_dialog = None
+            state._native_dialog_kind = None
+            if kind == "open":
+                state._fallback_open_dialog()
+            elif kind == "save":
+                state._fallback_save_as_dialog()
+            elif kind == "results":
+                state._fallback_open_results_dialog()
+            return
+        state._native_dialog = None
+        state._native_dialog_kind = None
+        state.apply_native_dialog_result(kind, result)
+
     def _draw_modals(state: StudioState) -> None:
-        """Render modal popups triggered from the menu bar."""
-        if imgui.begin_popup_modal("Open Model", None)[0]:
+        """Render path dialogs at the host-window ID stack, not from File menus."""
+        modal_flags = imgui.WindowFlags_.always_auto_resize
+        if state.pending_popup:
+            imgui.open_popup(state.pending_popup)
+            state.pending_popup = None
+
+        if imgui.begin_popup_modal("Open Model", None, modal_flags)[0]:
             imgui.text("Path to JAAM model")
-            _, state.open_dialog_path = imgui.input_text("##open-path", state.open_dialog_path, 1024)
+            _, state.open_dialog_path = imgui.input_text("##open-path", state.open_dialog_path)
             if imgui.button("Open", imgui.ImVec2(120, 0)):
-                path = Path(state.open_dialog_path)
+                path = Path(state.open_dialog_path).expanduser()
                 if path.exists():
                     state.open_file(path)
                     imgui.close_current_popup()
@@ -903,15 +1074,15 @@ def launch(path: Path | None = None) -> None:
                 imgui.close_current_popup()
             imgui.end_popup()
 
-        if imgui.begin_popup_modal("Save As", None)[0]:
+        if imgui.begin_popup_modal("Save As", None, modal_flags)[0]:
             imgui.text("Save model as")
-            _, state.save_as_dialog_path = imgui.input_text("##save-as-path", state.save_as_dialog_path, 1024)
+            _, state.save_as_dialog_path = imgui.input_text("##save-as-path", state.save_as_dialog_path)
             if imgui.button("Save", imgui.ImVec2(120, 0)):
                 path = Path(state.save_as_dialog_path)
                 try:
                     state.save_as(path)
                     imgui.close_current_popup()
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     state.diagnostics = (
                         Diagnostic("J903", f"could not save: {exc}", _unknown_span()),
                     )
@@ -920,9 +1091,9 @@ def launch(path: Path | None = None) -> None:
                 imgui.close_current_popup()
             imgui.end_popup()
 
-        if imgui.begin_popup_modal("Open Results", None)[0]:
+        if imgui.begin_popup_modal("Open Results", None, modal_flags)[0]:
             imgui.text("Completed artifact directory")
-            _, state.results_dialog_path = imgui.input_text("##results-path", state.results_dialog_path, 1024)
+            _, state.results_dialog_path = imgui.input_text("##results-path", state.results_dialog_path)
             if imgui.button("Open", imgui.ImVec2(120, 0)):
                 try:
                     state.load_artifact(Path(state.results_dialog_path))
@@ -936,7 +1107,7 @@ def launch(path: Path | None = None) -> None:
                 imgui.text_colored((1.0, 0.35, 0.25, 1.0), state.radiation_error)
             imgui.end_popup()
 
-        if state.about_open and imgui.begin_popup_modal("About JAAM Studio", None)[0]:
+        if imgui.begin_popup_modal("About JAAM Studio", None, modal_flags)[0]:
             imgui.text("JAAM Studio")
             imgui.text_disabled("Just Another Antenna Modeller")
             imgui.separator()
@@ -953,6 +1124,9 @@ def launch(path: Path | None = None) -> None:
         io = imgui.get_io()
         io.config_flags |= imgui.ConfigFlags_.viewports_enable
         menu_bar_height = _draw_main_menu_bar(state)
+        _handle_studio_shortcuts(state)
+        _poll_native_dialog(state)
+        _draw_modals(state)
 
         available = imgui.get_content_region_avail()
         width = max(float(available.x), 1.0)
@@ -1013,7 +1187,9 @@ def launch(path: Path | None = None) -> None:
             imgui.text_disabled(str(state.source_path or "Untitled"))
             imgui.separator()
             changed, text = imgui.input_text_multiline(
-                "##source", state.source_text, imgui.ImVec2(-1, -1)
+                f"##source#{state.editor_generation}",
+                state.source_text,
+                imgui.ImVec2(-1, -1),
             )
             if changed:
                 state.source_text = text
@@ -1057,10 +1233,23 @@ def launch(path: Path | None = None) -> None:
                 state.cancel_run()
             _, state.presentation_mode = imgui.checkbox("Presentation mode", state.presentation_mode)
             imgui.separator()
+            imgui.text(f"Backend: {state.solver_backend}")
+            note = BACKEND_PASS_NOTES.get(state.solver_backend, "")
+            if note:
+                imgui.text_wrapped(note)
+            imgui.separator()
             if state.compilation:
                 imgui.text_colored((0.35, 0.9, 0.5, 1.0), "COMPILE OK")
                 for compiler_pass in state.compilation.passes:
-                    imgui.text(f"{compiler_pass.name}: {compiler_pass.duration_ns / 1e6:.3f} ms")
+                    stats = ", ".join(f"{key}={value}" for key, value in compiler_pass.statistics.items())
+                    opened = imgui.tree_node(f"{compiler_pass.name}##pass")
+                    imgui.same_line()
+                    imgui.text_disabled(f"{compiler_pass.duration_ns / 1e6:.3f} ms")
+                    if opened:
+                        imgui.text_wrapped(PASS_DESCRIPTIONS.get(compiler_pass.name, "No description."))
+                        if stats:
+                            imgui.text_disabled(stats)
+                        imgui.tree_pop()
             for diagnostic in state.diagnostics:
                 imgui.text_colored((1.0, 0.35, 0.25, 1.0), f"{diagnostic.code}: {diagnostic.message}")
             end_panel("Build / Pass Trace")
@@ -1108,8 +1297,6 @@ def launch(path: Path | None = None) -> None:
                 )
             else:
                 state._draw_3d_panel()
-
-        _draw_modals(state)
 
         imgui.end_child()
 

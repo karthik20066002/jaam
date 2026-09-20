@@ -17,6 +17,9 @@ def test_run_artifacts_are_versioned_complete_and_unique(tmp_path):
     assert manifest["mesh"]["totalCells"] > 0
     assert len(manifest["hashes"]["sourceSha256"]) == 64
     assert (first / "generated.py").read_text().startswith("#!/usr/bin/env python3")
+    assert '"Type": "Driven"' in (first / "palace.json").read_text()
+    assert '"cylinders"' in (first / "meep.json").read_text()
+    assert "driven__a" in (first / "scuff.json").read_text()
     persisted = json.loads((first / "manifest.json").read_text())
     assert persisted["runId"] == first.name
     assert json.loads((first / "resolved-ir.json").read_text())["geometry"]

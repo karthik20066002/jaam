@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from jaam.compiler import compile_file
-from jaam.container import ContainerEngine, SOLVER_IMAGE
+from jaam.container import PALACE_IMAGE, ContainerEngine, SOLVER_IMAGE
 from jaam.doctor import finale_checks
 
 
@@ -47,6 +47,15 @@ def test_solve_command_uses_venv_python_and_mounts_artifacts(tmp_path):
     assert "/work/generated.py" in command
 
 
+def test_palace_command_mounts_work_and_passes_config(tmp_path):
+    command = ContainerEngine("podman").palace_command(tmp_path)
+    assert command[:4] == ["podman", "run", "--rm", "--network=none"]
+    assert f"{tmp_path.resolve()}:/work:Z" in command
+    assert PALACE_IMAGE in command
+    assert command[-2:] == ["--serial", "palace.json"]
+    assert "-w" in command
+
+
 def test_solve_command_accepts_custom_script(tmp_path):
     command = ContainerEngine("podman").solve_command(tmp_path, script="solve.py")
     assert "/work/solve.py" in command
@@ -55,4 +64,14 @@ def test_solve_command_accepts_custom_script(tmp_path):
 def test_finale_doctor_returns_named_checks(monkeypatch):
     monkeypatch.setattr("jaam.doctor.ContainerEngine.discover", classmethod(lambda cls: ContainerEngine("true")))
     names = {check.name for check in finale_checks()}
-    assert {"ImGui Bundle", "VTK", "container engine", "pinned solver image", "artifact directory"} <= names
+    assert {
+        "ImGui Bundle",
+        "VTK",
+        "container engine",
+        "pinned solver image",
+        "Palace container image",
+        "artifact directory",
+        "Palace executable",
+        "Meep Python",
+        "SCUFF-EM scuff-rf",
+    } <= names

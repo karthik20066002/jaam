@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 from jaam.compiler import compile_file
-from jaam.emitter import emit_python
+from jaam.emitter import emit_palace_config, emit_python
 
 
 def test_generated_python_is_deterministic_and_valid():
@@ -15,3 +15,7 @@ def test_generated_python_is_deterministic_and_valid():
     assert "CreateNF2FFBox" in first
     assert '"nf2ff.csv"' in first
     assert "port1_s11.csv" not in first  # filename remains parameterized by port index
+    palace = emit_palace_config(ir)
+    assert palace == emit_palace_config(ir)
+    assert "LumpedPort" in palace
+    assert "AddLumpedPort" not in palace

@@ -1,9 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 import pprint
 
+from .backends.meep import meep_cylinders, meep_fcen, meep_fwidth, meep_resolution, meep_source
+from .backends.palace import build_palace_config
+from .backends.scuff import emit_scuff_manifest
 from .ir import BoxOp, CurveOp, RotPolyOp, SimulationIR, WireOp
+
+
+def emit_meep_config(ir: SimulationIR) -> str:
+    """Render a JSON snapshot of the Meep geometry, source, and mesh scale."""
+    spec = {
+        "fcen": meep_fcen(ir),
+        "fwidth": meep_fwidth(ir),
+        "resolution": meep_resolution(ir),
+        "cylinders": meep_cylinders(ir),
+        "source": meep_source(ir),
+        "domain_min": ir.domain_min,
+        "domain_max": ir.domain_max,
+    }
+    return json.dumps(spec, indent=2, sort_keys=True) + "\n"
+
+
+def emit_scuff_config(ir: SimulationIR) -> str:
+    """Render a JSON snapshot of the SCUFF surface-mesh job."""
+    return emit_scuff_manifest(ir)
+
+
+def emit_palace_config(ir: SimulationIR, *, farfield: bool = True) -> str:
+    """Render a Palace driven-simulation JSON config."""
+    return json.dumps(build_palace_config(ir, farfield=farfield), indent=2, sort_keys=True) + "\n"
 
 
 def emit_python(ir: SimulationIR) -> str:
@@ -62,9 +90,12 @@ def main():
     grid = csx.GetGrid()
     grid.SetDeltaUnit(1.0)
     mesh = SPEC["mesh"]
+    smoothing_res = mesh["smoothing_resolution_m"]
+    if smoothing_res is None:
+        smoothing_res = mesh["max_resolution_m"]
     for axis, lines in zip("xyz", (mesh["lines_x"], mesh["lines_y"], mesh["lines_z"])):
         grid.SetLines(axis, lines)
-        grid.SmoothMeshLines(axis, mesh["max_resolution_m"], ratio=mesh["grading_ratio"])
+        grid.SmoothMeshLines(axis, smoothing_res, ratio=mesh["grading_ratio"])
     if not ports:
         raise ValueError("S11 requires at least one feed port")
     if len(ports) != 1:

@@ -82,6 +82,14 @@ class MeshSpec:
     lines_z: tuple[float, ...]
     max_resolution_m: float
     grading_ratio: float = 1.5
+    # Ceiling passed to the native solver's line-smoothing call. Distinct
+    # from max_resolution_m (the *validation* threshold ValidateMeshResolutionPass
+    # checks wire/feed coverage against) because a pass that intentionally
+    # coarsens lines away from geometry (GradedMeshCoarseningPass) needs the
+    # native smoother to respect that coarsening instead of re-densifying it
+    # back to the fine validation resolution everywhere. None means "use
+    # max_resolution_m", i.e. today's behavior when no such pass has run.
+    smoothing_resolution_m: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

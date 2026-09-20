@@ -1,0 +1,125 @@
+#!/bin/sh
+# Pull the published Palace 0.16 SIF from GHCR and import it as
+# localhost/jaam-palace:0.16 for podman/docker.
+set -eu
+
+image="${JAAM_PALACE_IMAGE:-localhost/jaam-palace:0.16}"
+workdir="${JAAM_PALACE_CACHE:-$HOME/.cache/jaam-palace}"
+sif="$workdir/palace_016.sif"
+blob="sha256:6d59c1aca1425bcdc71e84502f88a9018689c94fa8bb41476617dbe5ed9509ac"
+
+mkdir -p "$workdir"
+expected="${blob#sha256:}"
+url="https://ghcr.io/v2/volkermuehlhaus/palace_016/blobs/$blob"
+
+_token() {
+    curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:volkermuehlhaus/palace_016:pull" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])"
+}
+
+_have_sif() {
+    actual=$(sha256sum "$sif" 2>/dev/null | awk '{print $1}' || true)
+    [ "${actual:-}" = "$expected" ]
+}
+
+# This GHCR blob ignores Range requests (responding 200 with the entire file).
+# Do not use aria2c's segmented mode: its concurrent full-file responses
+# corrupt the output. A single stream is slower but is checksum-verifiable.
+# Split files from a failed download are trash and must be removed first.
+if ! _have_sif; then
+    rm -f "$sif" "$sif.part" "$sif.aria2"
+    if command -v aria2c >/dev/null 2>&1; then
+        echo "downloading palace SIF with aria2c, single stream (1.14 GB)..." >&2
+        token=$(_token)
+        if ! aria2c --allow-overwrite=true --auto-file-renaming=false \
+            --continue=false \
+            -x 1 -s 1 \
+            --max-tries=8 --retry-wait=2 --timeout=120 \
+            --checksum="sha-256=$expected" \
+            --header="Authorization: Bearer $token" \
+            --dir="$workdir" --out="palace_016.sif" \
+            "$url"; then
+            echo "aria2c single-stream download failed; retrying once with a fresh token..." >&2
+            rm -f "$sif" "$sif.aria2"
+            token=$(_token)
+            aria2c --allow-overwrite=true --auto-file-renaming=false \
+                --continue=false \
+                -x 1 -s 1 \
+                --max-tries=8 --retry-wait=2 --timeout=120 \
+                --checksum="sha-256=$expected" \
+                --header="Authorization: Bearer $token" \
+                --dir="$workdir" --out="palace_016.sif" \
+                "$url"
+        fi
+    else
+        echo "aria2c not found; falling back to curl (install aria2 for a more reliable pull)" >&2
+        token=$(_token)
+        curl --http1.1 --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer $token" \
+            "$url" -o "$sif"
+    fi
+    if ! _have_sif; then
+        echo "palace SIF checksum mismatch after download (want $expected)" >&2
+        exit 1
+    fi
+fi
+
+if command -v apptainer >/dev/null 2>&1; then
+    sandbox="$workdir/rootfs"
+    rm -rf "$sandbox"
+    apptainer build --sandbox "$sandbox" "$sif"
+    tar -C "$sandbox" -c . | podman import --change 'ENTRYPOINT ["palace"]' --change 'WORKDIR /work' - "$image"
+    echo "imported $image from apptainer sandbox"
+    exit 0
+fi
+
+if command -v unsquashfs >/dev/null 2>&1; then
+    python3 - "$sif" "$workdir" "$image" <<'PY'
+import os, struct, subprocess, sys
+from pathlib import Path
+
+sif, workdir, image = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+data = sif.read_bytes()
+# SIF magic at start; walk descriptors for a Squashfs partition.
+magic = data[0:4]
+if magic != b"SIF\x00" and b"squashfs" not in data[:4096].lower():
+    # Fall back: find the Squashfs magic anywhere.
+    offset = data.find(b"hsqs")
+else:
+    offset = data.find(b"hsqs")
+if offset < 0:
+    raise SystemExit("could not find squashfs payload in SIF")
+sq = workdir / "root.squashfs"
+sq.write_bytes(data[offset:])
+root = workdir / "rootfs"
+subprocess.run(["unsquashfs", "-no-xattrs", "-f", "-d", str(root), str(sq)], check=True)
+palace_bin = root / "opt" / "palace" / "bin" / "palace"
+if not palace_bin.is_file():
+    palace_bin = next((path for path in root.rglob("palace") if path.is_file()), None)
+if palace_bin is None:
+    raise SystemExit("extracted rootfs has no palace binary")
+entry = "/" + palace_bin.relative_to(root).as_posix()
+tar = subprocess.Popen(
+    ["tar", "--ignore-failed-read", "-C", str(root), "-c", "."],
+    stdout=subprocess.PIPE,
+)
+subprocess.run(
+    [
+        "podman", "import",
+        "--change", f'ENTRYPOINT ["{entry}"]',
+        "--change", "WORKDIR /work",
+        "--change", "ENV PATH=/usr/local/bin:/usr/bin:/bin",
+        "-",
+        image,
+    ],
+    stdin=tar.stdout,
+    check=True,
+)
+tar.wait()
+print(f"imported {image} from squashfs at offset {offset}")
+PY
+    exit 0
+fi
+
+echo "need apptainer or unsquashfs to import $sif as $image" >&2
+exit 1

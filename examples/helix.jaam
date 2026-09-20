@@ -1,0 +1,23 @@
+frequency 2450MHz;
+boundary free_space;
+
+default {
+    material: copper;
+    radius: 1.5mm;
+}
+
+// Axial-mode helix: circumference ≈ λ, pitch ≈ 0.23 λ, 4 turns.
+// The stem is the fed end; concat joins it to the coil as one conductor.
+wire stem(
+    path: line(
+        from: (19.5mm, 0mm, -15mm),
+        to:   (19.5mm, 0mm, 0mm)
+    ),
+    feed: port(impedance: 50ohm)
+);
+
+wire coil(
+    path: helix(radius: 19.5mm, pitch: 28mm, turns: 4)
+);
+
+concat antenna(stem, coil);

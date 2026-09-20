@@ -59,10 +59,11 @@ mesh; resolution validation. Optional anchor pruning runs before validation.
 Curves are efficient for electrically thin conductors but do not resolve a
 cross-section. JAAM exposes its wavelength-based lowering choice in metadata.
 
-**Why openEMS?**
+**Why two backends?**
 
-It is an open FDTD solver with CSXCAD geometry, graded meshes, ports, PML, and
-NF2FF, so generated work stays inspectable.
+openEMS is the default FDTD path. Palace is FEM. Meep is a second FDTD path.
+SCUFF-EM is surface BEM with open cylindrical tubes and rim ports. Switch with
+`--backend openems|palace|meep|scuff` or Studio → Simulate.
 
 **How do you prevent a cached demo?**
 

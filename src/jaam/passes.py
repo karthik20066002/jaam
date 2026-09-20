@@ -8,6 +8,7 @@ import math
 
 from .diagnostics import Diagnostic
 from .ir import BoxOp, CurveOp, FeedSpec, MeshSpec, Point3, RotPolyOp, SimulationIR, WireOp
+from .mesh_features import fdtd_feature_axes
 from .model import SourceSpan
 
 
@@ -214,7 +215,7 @@ class GradedMeshCoarseningPass(Pass):
         coarse_res = wavelength * self.coarse_fraction
         transition_dist = wavelength * self.transition_fraction
 
-        feature_coords = self._feature_coordinates(ir.geometry)
+        feature_coords = fdtd_feature_axes(ir.geometry, wavelength)
         original_cells = (
             (len(ir.mesh.lines_x) - 1)
             * (len(ir.mesh.lines_y) - 1)
@@ -234,6 +235,7 @@ class GradedMeshCoarseningPass(Pass):
             new_lines[2],
             ir.mesh.max_resolution_m,
             ir.mesh.grading_ratio,
+            smoothing_resolution_m=coarse_res,
         )
         new_ir = replace(ir, mesh=new_mesh)
 
@@ -520,10 +522,55 @@ class ValidateMeshResolutionPass(Pass):
         return min(b - a for a, b in zip(relevant, relevant[1:]))
 
 
-DEFAULT_PASSES: PassList = (
+SHARED_PASSES: PassList = (
     ValidateFeedsPass(),
     CanonicalizeWireVerticesPass(),
     MergeCollinearWiresPass(),
+)
+
+FDTD_PASSES: PassList = (
     GradedMeshCoarseningPass(),
     ValidateMeshResolutionPass(),
 )
+
+DEFAULT_PASSES: PassList = SHARED_PASSES + FDTD_PASSES
+
+PASS_DESCRIPTIONS: dict[str, str] = {
+    "parse": "Read the JAAM source into an AST.",
+    "directives-and-defaults": "Apply frequency, boundary, and default material/radius.",
+    "geometry-expansion-and-unit-normalization": "Expand helix/arc/concat and convert all lengths to metres.",
+    "semantic-validation": "Reject illegal units, names, and path builders.",
+    "dead-structure-elimination": "Drop concat ingredients and zero-length or degenerate shapes.",
+    "thin-and-thick-wire-lowering": "Split fed wires; CurveOp if radius/λ < 0.02 else WireOp.",
+    "exact-geometry-deduplication": "Collapse identical primitives.",
+    "domain-and-mesh-construction": "Pad a bounding box and build a Cartesian mesh plan (openEMS / Studio grid).",
+    "validate-feeds": "Require a usable feed gap on a driven wire.",
+    "canonicalize-wire-vertices": "Remove redundant collinear vertices; keep corners and the feed.",
+    "merge-collinear-wires": "Join abutting collinear segments into one conductor.",
+    "graded-mesh-coarsening": "openEMS: keep λ/20 near metal, coarsen toward λ/8 in empty space.",
+    "validate-mesh-resolution": "openEMS: feed gap must span ≥3 cells; thick wires must be resolved.",
+    "mesh-anchor-pruning": "Experimental: drop leftover tessellation lines that are not structural.",
+}
+
+BACKEND_PASS_NOTES: dict[str, str] = {
+    "openems": "FDTD: Cartesian Yee grid. Graded coarsening and mesh checks apply. Far-field is NF2FF.",
+    "scuff": "BEM: open cylindrical tubes and rim ports are built at run time. Yee coarsening is skipped.",
+    "palace": "FEM: Gmsh tets and a lumped-port face are built at run time. Yee coarsening is skipped.",
+    "meep": "FDTD: PEC cylinders and PML are built at run time. Yee coarsening is skipped.",
+}
+
+
+def passes_for_backend(backend: str, *, optimize_mesh_anchors: bool = False) -> PassList:
+    shared = SHARED_PASSES
+    if backend != "openems":
+        return shared
+    if optimize_mesh_anchors:
+        return (
+            ValidateFeedsPass(),
+            CanonicalizeWireVerticesPass(),
+            MergeCollinearWiresPass(),
+            GradedMeshCoarseningPass(),
+            MeshAnchorPruningPass(),
+            ValidateMeshResolutionPass(),
+        )
+    return DEFAULT_PASSES

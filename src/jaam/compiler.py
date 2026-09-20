@@ -8,7 +8,7 @@ from .diagnostics import Diagnostic
 from .frontend import parse_file, parse_text
 from .ir import SimulationIR
 from .model import PrimitiveDecl, Program, SourceSpan
-from .passes import DEFAULT_PASSES, MeshAnchorPruningPass
+from .passes import passes_for_backend
 from .semantics import analyze
 
 
@@ -32,7 +32,13 @@ class CompilationResult:
         return sum(item.duration_ns for item in self.passes)
 
 
-def _compile(program: Program, parse_duration_ns: int, *, optimize_mesh_anchors: bool = False) -> CompilationResult:
+def _compile(
+    program: Program,
+    parse_duration_ns: int,
+    *,
+    optimize_mesh_anchors: bool = False,
+    backend: str = "openems",
+) -> CompilationResult:
     passes = [PassTrace("parse", parse_duration_ns, {"statements": len(program.statements)})]
 
     def record(name: str, duration_ns: int, statistics: dict[str, int]) -> None:
@@ -41,7 +47,7 @@ def _compile(program: Program, parse_duration_ns: int, *, optimize_mesh_anchors:
     ir = analyze(program, trace=record)
 
     diagnostics: list[Diagnostic] = []
-    passes_to_run = DEFAULT_PASSES[:-1] + (MeshAnchorPruningPass(), DEFAULT_PASSES[-1]) if optimize_mesh_anchors else DEFAULT_PASSES
+    passes_to_run = passes_for_backend(backend, optimize_mesh_anchors=optimize_mesh_anchors)
     for pass_ in passes_to_run:
         started = perf_counter_ns()
         result = pass_.run(ir)
@@ -68,21 +74,50 @@ def _compile(program: Program, parse_duration_ns: int, *, optimize_mesh_anchors:
     return CompilationResult(program, ir, tuple(diagnostics), source_map, tuple(passes))
 
 
-def compile_text_result(source: str, *, filename: str = "<input>", optimize_mesh_anchors: bool = False) -> CompilationResult:
+def compile_text_result(
+    source: str,
+    *,
+    filename: str = "<input>",
+    optimize_mesh_anchors: bool = False,
+    backend: str = "openems",
+) -> CompilationResult:
     started = perf_counter_ns()
     program = parse_text(source, filename=filename)
-    return _compile(program, perf_counter_ns() - started, optimize_mesh_anchors=optimize_mesh_anchors)
+    return _compile(
+        program,
+        perf_counter_ns() - started,
+        optimize_mesh_anchors=optimize_mesh_anchors,
+        backend=backend,
+    )
 
 
-def compile_file_result(path: Path, *, optimize_mesh_anchors: bool = False) -> CompilationResult:
+def compile_file_result(
+    path: Path,
+    *,
+    optimize_mesh_anchors: bool = False,
+    backend: str = "openems",
+) -> CompilationResult:
     started = perf_counter_ns()
     program = parse_file(path)
-    return _compile(program, perf_counter_ns() - started, optimize_mesh_anchors=optimize_mesh_anchors)
+    return _compile(
+        program,
+        perf_counter_ns() - started,
+        optimize_mesh_anchors=optimize_mesh_anchors,
+        backend=backend,
+    )
 
 
-def compile_text(source: str, *, filename: str = "<input>", optimize_mesh_anchors: bool = False) -> SimulationIR:
-    return compile_text_result(source, filename=filename, optimize_mesh_anchors=optimize_mesh_anchors).ir
+def compile_text(
+    source: str,
+    *,
+    filename: str = "<input>",
+    optimize_mesh_anchors: bool = False,
+    backend: str = "openems",
+) -> SimulationIR:
+    return compile_text_result(
+        source, filename=filename, optimize_mesh_anchors=optimize_mesh_anchors, backend=backend
+    ).ir
 
 
-def compile_file(path: Path, *, optimize_mesh_anchors: bool = False) -> SimulationIR:
-    return compile_file_result(path, optimize_mesh_anchors=optimize_mesh_anchors).ir
+def compile_file(path: Path, *, optimize_mesh_anchors: bool = False, backend: str = "openems") -> SimulationIR:
+    return compile_file_result(path, optimize_mesh_anchors=optimize_mesh_anchors, backend=backend).ir

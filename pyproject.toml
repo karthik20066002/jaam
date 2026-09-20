@@ -23,6 +23,9 @@ studio = [
   "pyvista>=0.45",
   "vtk>=9.3",
 ]
+palace = [
+  "gmsh>=4.13",
+]
 
 [project.scripts]
 jaam = "jaam.cli:main"

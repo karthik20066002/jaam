@@ -8,9 +8,9 @@ import sys
 from .artifacts import create_run_artifact, write_manifest
 from .compiler import CompilationResult, compile_file_result
 from .diagnostics import CompilationError, render_diagnostics
-from .emitter import emit_python
+from .emitter import emit_meep_config, emit_palace_config, emit_python, emit_scuff_config
 from .ir import CurveOp, SimulationIR, WireOp
-from .runtime import NativeDependencyError, run_simulation
+from .runtime import BACKENDS, DEFAULT_BACKEND, NativeDependencyError, run_simulation
 from .serialization import compilation_to_dict
 from .container import ContainerEngine, ContainerUnavailableError
 
@@ -23,11 +23,23 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("source", type=Path)
         command.add_argument("--format", choices=("human", "json"), default="human")
         command.add_argument("--optimize-mesh-anchors", action="store_true", help="experimental fixed-anchor pruning for tessellated curves")
+        command.add_argument(
+            "--backend",
+            choices=BACKENDS,
+            default=DEFAULT_BACKEND,
+            help="solver backend (also selects compile passes)",
+        )
         if name == "compile":
             command.add_argument("-o", "--output", type=Path)
         if name == "run":
             command.add_argument("--output-dir", type=Path)
-            command.add_argument("--no-farfield", action="store_true", help="skip NF2FF capture for faster S11 iteration")
+            command.add_argument("--no-farfield", action="store_true", help="skip far-field capture for faster S11 iteration")
+            command.add_argument(
+                "--farfield",
+                choices=("off", "preview", "full"),
+                default="full",
+                help="far-field sample density (preview is coarser; --no-farfield aliases off)",
+            )
     studio = subparsers.add_parser("studio")
     studio.add_argument("source", type=Path, nargs="?")
     doctor = subparsers.add_parser("doctor")
@@ -77,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
     try:
-        result = compile_file_result(args.source, optimize_mesh_anchors=args.optimize_mesh_anchors)
+        result = compile_file_result(
+            args.source,
+            optimize_mesh_anchors=args.optimize_mesh_anchors,
+            backend=args.backend,
+        )
         ir = result.ir
     except OSError as exc:
         print(f"jaam: {exc}", file=sys.stderr)
@@ -106,8 +122,18 @@ def main(argv: list[str] | None = None) -> int:
             print("check succeeded")
         return 0
     if args.command == "compile":
-        output = args.output or args.source.with_suffix(".py")
-        output.write_text(emit_python(ir), encoding="utf-8")
+        if args.backend == "palace":
+            output = args.output or args.source.with_suffix(".json")
+            output.write_text(emit_palace_config(ir), encoding="utf-8")
+        elif args.backend == "meep":
+            output = args.output or args.source.with_suffix(".meep.json")
+            output.write_text(emit_meep_config(ir), encoding="utf-8")
+        elif args.backend == "scuff":
+            output = args.output or args.source.with_suffix(".scuff.json")
+            output.write_text(emit_scuff_config(ir), encoding="utf-8")
+        else:
+            output = args.output or args.source.with_suffix(".py")
+            output.write_text(emit_python(ir), encoding="utf-8")
         if args.format == "human":
             print(f"wrote {output}")
         return 0
@@ -121,16 +147,19 @@ def main(argv: list[str] | None = None) -> int:
             # generated script is retained as a dependency fallback.
             run_result = run_simulation(
                 ir, output_dir,
-                farfield=False if args.no_farfield else True,
+                farfield="off" if args.no_farfield else args.farfield,
+                backend=args.backend,
             )
-            solver_engine = "host"
+            solver_engine = f"host:{args.backend}"
         except NativeDependencyError as native_error:
             try:
                 engine = ContainerEngine.discover()
                 if not engine.image_exists():
                     raise native_error
+                if args.backend not in {"openems"}:
+                    raise native_error
                 run_result = engine.run(output_dir)
-                solver_engine = engine.name
+                solver_engine = f"{engine.name}:openems"
             except (ContainerUnavailableError, FileNotFoundError):
                 raise native_error
     except NativeDependencyError as exc:

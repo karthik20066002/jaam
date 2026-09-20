@@ -10,7 +10,7 @@ import uuid
 
 from . import __version__
 from .compiler import CompilationResult
-from .emitter import emit_python
+from .emitter import emit_meep_config, emit_palace_config, emit_python, emit_scuff_config
 from .serialization import SCHEMA_VERSION, ir_to_dict
 
 
@@ -28,8 +28,14 @@ def create_run_artifact(
 
     ir_text = json.dumps(ir_to_dict(result.ir), indent=2, sort_keys=True) + "\n"
     generated = emit_python(result.ir)
+    palace_json = emit_palace_config(result.ir)
+    meep_json = emit_meep_config(result.ir)
+    scuff_json = emit_scuff_config(result.ir)
     (run_dir / "resolved-ir.json").write_text(ir_text, encoding="utf-8")
     (run_dir / "generated.py").write_text(generated, encoding="utf-8")
+    (run_dir / "palace.json").write_text(palace_json, encoding="utf-8")
+    (run_dir / "meep.json").write_text(meep_json, encoding="utf-8")
+    (run_dir / "scuff.json").write_text(scuff_json, encoding="utf-8")
     cell_counts = [
         len(result.ir.mesh.lines_x) - 1,
         len(result.ir.mesh.lines_y) - 1,
@@ -45,6 +51,9 @@ def create_run_artifact(
             "sourceSha256": hashlib.sha256(source.read_bytes()).hexdigest(),
             "irSha256": hashlib.sha256(ir_text.encode()).hexdigest(),
             "generatedPythonSha256": hashlib.sha256(generated.encode()).hexdigest(),
+            "palaceJsonSha256": hashlib.sha256(palace_json.encode()).hexdigest(),
+            "meepJsonSha256": hashlib.sha256(meep_json.encode()).hexdigest(),
+            "scuffJsonSha256": hashlib.sha256(scuff_json.encode()).hexdigest(),
         },
         "versions": {"jaam": __version__, "python": platform.python_version()},
         "compiler": {
@@ -60,6 +69,9 @@ def create_run_artifact(
         "outputs": {
             "ir": "resolved-ir.json",
             "python": "generated.py",
+            "palace": "palace.json",
+            "meep": "meep.json",
+            "scuff": "scuff.json",
             "solverLog": "solver.log.jsonl",
         },
     }

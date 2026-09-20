@@ -7,6 +7,7 @@ VTK is imported lazily so the compiler remains lightweight without the optional
 from __future__ import annotations
 
 import ctypes
+from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
@@ -19,11 +20,65 @@ from .farfield import gain_surface_points
 if TYPE_CHECKING:
     from vtkmodules.vtkRenderingCore import vtkActor, vtkRenderer, vtkRenderWindow
 
-__all__ = ["AntennaViz3D", "StudioDependencyError"]
+__all__ = ["AntennaViz3D", "StudioDependencyError", "load_gmsh22_triangles"]
 
 
 class StudioDependencyError(RuntimeError):
     pass
+
+
+def load_gmsh22_triangles(path: Path) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Load triangle vertices from a Gmsh 2.2 ASCII surface mesh."""
+    text = path.read_text(encoding="utf-8")
+    nodes: dict[int, tuple[float, float, float]] = {}
+    triangles: list[tuple[int, int, int]] = []
+    section = None
+    remaining = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "$Nodes":
+            section = "nodes_count"
+            continue
+        if line == "$EndNodes":
+            section = None
+            continue
+        if line == "$Elements":
+            section = "elements_count"
+            continue
+        if line == "$EndElements":
+            section = None
+            continue
+        if section == "nodes_count":
+            remaining = int(line)
+            section = "nodes"
+            continue
+        if section == "nodes":
+            index_s, x_s, y_s, z_s = line.split()[:4]
+            nodes[int(index_s)] = (float(x_s), float(y_s), float(z_s))
+            remaining -= 1
+            if remaining <= 0:
+                section = None
+            continue
+        if section == "elements_count":
+            remaining = int(line)
+            section = "elements"
+            continue
+        if section == "elements":
+            parts = line.split()
+            remaining -= 1
+            if remaining <= 0:
+                section = None
+            if len(parts) < 8 or int(parts[1]) != 2:
+                continue
+            ntags = int(parts[2])
+            triangles.append((int(parts[3 + ntags]) - 1, int(parts[4 + ntags]) - 1, int(parts[5 + ntags]) - 1))
+    ordered = [nodes[index] for index in sorted(nodes)]
+    remap = {gmsh_id: i for i, gmsh_id in enumerate(sorted(nodes))}
+    remapped = []
+    for a, b, c in triangles:
+        # triangle indices were written as gmsh ids minus 1; recover gmsh id = idx+1
+        remapped.append((remap[a + 1], remap[b + 1], remap[c + 1]))
+    return ordered, remapped
 
 
 def _save_glx_context():
@@ -86,9 +141,10 @@ class AntennaViz3D:
     _DOMAIN_COLOR = (0.90, 0.90, 0.90)  # light gray
     _BACKGROUND_COLOR = (0.10, 0.10, 0.10)
 
-    def __init__(self, ir: SimulationIR, show_mesh: bool = True) -> None:
+    def __init__(self, ir: SimulationIR, show_mesh: bool = True, surface_mesh: Path | None = None) -> None:
         self._ir = ir
         self._show_mesh = show_mesh
+        self._surface_mesh = Path(surface_mesh) if surface_mesh is not None else None
         self._renderer: vtkRenderer | None = None
         self._axis_renderer: vtkRenderer | None = None
         self._render_window: vtkRenderWindow | None = None
@@ -198,15 +254,23 @@ class AntennaViz3D:
         if self._renderer is None:
             return
 
-        for op in (self._ir.geometry if self._radiation is None or self._pattern_structure else ()):
-            actor = self._geometry_actor(op)
-            self._renderer.AddActor(actor)
-            self._actors.append(actor)
-
-            if isinstance(op, (CurveOp, WireOp)) and op.feed is not None:
-                feed_actor = self._feed_actor(op.feed)
-                self._renderer.AddActor(feed_actor)
-                self._actors.append(feed_actor)
+        show_structure = self._radiation is None or self._pattern_structure
+        surface = self._load_surface_mesh() if show_structure or self._show_mesh else None
+        if show_structure:
+            if surface is not None:
+                actor = self._surface_mesh_actor(surface, wireframe=False)
+                self._renderer.AddActor(actor)
+                self._actors.append(actor)
+            else:
+                for op in self._ir.geometry:
+                    actor = self._geometry_actor(op)
+                    self._renderer.AddActor(actor)
+                    self._actors.append(actor)
+            for op in self._ir.geometry:
+                if isinstance(op, (CurveOp, WireOp)) and op.feed is not None:
+                    feed_actor = self._feed_actor(op.feed)
+                    self._renderer.AddActor(feed_actor)
+                    self._actors.append(feed_actor)
 
         if self._radiation is None:
             domain_actor = self._domain_actor(self._ir.domain_min, self._ir.domain_max)
@@ -214,9 +278,14 @@ class AntennaViz3D:
             self._actors.append(domain_actor)
 
         if self._show_mesh:
-            grid_actor = self._grid_actor(self._ir)
-            self._renderer.AddActor(grid_actor)
-            self._actors.append(grid_actor)
+            if surface is not None:
+                wire = self._surface_mesh_actor(surface, wireframe=True)
+                self._renderer.AddActor(wire)
+                self._actors.append(wire)
+            else:
+                grid_actor = self._grid_actor(self._ir)
+                self._renderer.AddActor(grid_actor)
+                self._actors.append(grid_actor)
 
         scalar_bar = None
         if self._radiation is not None:
@@ -245,6 +314,51 @@ class AntennaViz3D:
         if scalar_bar is not None:
             self._renderer.AddViewProp(scalar_bar)
             self._actors.append(scalar_bar)
+
+    def _load_surface_mesh(self) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]] | None:
+        if self._surface_mesh is None or not self._surface_mesh.is_file():
+            return None
+        points, triangles = load_gmsh22_triangles(self._surface_mesh)
+        if not points or not triangles:
+            return None
+        extent = max(abs(coord) for point in points for coord in point)
+        # SCUFF writes millimetres; JAAM IR and the VTK scene are metres.
+        scale = 0.001 if extent > 10.0 else 1.0
+        scaled = [(point[0] * scale, point[1] * scale, point[2] * scale) for point in points]
+        return scaled, triangles
+
+    def _surface_mesh_actor(
+        self,
+        mesh: tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]],
+        *,
+        wireframe: bool,
+    ) -> vtkActor:
+        points, triangles = mesh
+        vtk_points = self._vtk("vtkPoints")()
+        for point in points:
+            vtk_points.InsertNextPoint(*point)
+        cells = self._vtk("vtkCellArray")()
+        for tri in triangles:
+            cells.InsertNextCell(3)
+            cells.InsertCellPoint(tri[0])
+            cells.InsertCellPoint(tri[1])
+            cells.InsertCellPoint(tri[2])
+        polydata = self._vtk("vtkPolyData")()
+        polydata.SetPoints(vtk_points)
+        polydata.SetPolys(cells)
+        mapper = self._vtk("vtkPolyDataMapper")()
+        mapper.SetInputData(polydata)
+        actor = self._vtk("vtkActor")()
+        actor.SetMapper(mapper)
+        if wireframe:
+            actor.GetProperty().SetRepresentationToWireframe()
+            actor.GetProperty().SetColor(0.15, 0.16, 0.18)
+            actor.GetProperty().SetLineWidth(1.0)
+        else:
+            actor.GetProperty().SetColor(*self._WIRE_COLOR)
+            actor.GetProperty().SetAmbient(0.55)
+            actor.GetProperty().SetDiffuse(0.45)
+        return actor
 
     def _geometry_actor(self, op: GeometryOp) -> vtkActor:
         if isinstance(op, (CurveOp, WireOp)):
@@ -574,6 +688,12 @@ class AntennaViz3D:
         """Rebuild the scene actors from a new IR without recreating the render window."""
         self._ir = ir
         self._rebuild_actors()
+
+    def set_surface_mesh(self, path: Path | None) -> None:
+        resolved = Path(path) if path is not None else None
+        if self._surface_mesh != resolved:
+            self._surface_mesh = resolved
+            self._rebuild_actors()
 
     def set_show_mesh(self, show_mesh: bool) -> None:
         if self._show_mesh != show_mesh:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pathlib import Path
+
 from jaam.ir import (
     BoxOp,
     FeedSpec,
@@ -69,6 +71,18 @@ def test_viz3d_smoke() -> None:
 
     assert isinstance(image, np.ndarray)
     assert image.shape == (200, 200, 4)
+    assert image.dtype == np.uint8
+
+
+def test_viz3d_renders_scuff_surface_mesh(tmp_path) -> None:
+    from jaam.backends.scuff import write_scuff_inputs
+    from jaam.compiler import compile_file
+
+    ir = compile_file(Path("examples/yagi.jaam"))
+    job = write_scuff_inputs(ir, tmp_path, stem="yagi")
+    viz = AntennaViz3D(ir, show_mesh=True, surface_mesh=job["mesh"])
+    image = viz.render_to_array(160, 160)
+    assert image.shape == (160, 160, 4)
     assert image.dtype == np.uint8
 
 

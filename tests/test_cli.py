@@ -64,8 +64,8 @@ def test_run_creates_a_new_timestamped_artifact(monkeypatch, tmp_path, capsys):
 def test_no_farfield_run_records_s11_only(monkeypatch, tmp_path):
     seen = []
 
-    def fake_run(ir, output_dir, *, farfield=True):
-        seen.append(farfield)
+    def fake_run(ir, output_dir, *, farfield=True, backend="openems"):
+        seen.append((farfield, backend))
         csv_path = output_dir / "port1_s11.csv"
         csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
         return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
@@ -74,9 +74,76 @@ def test_no_farfield_run_records_s11_only(monkeypatch, tmp_path):
     monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
     assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--no-farfield"]) == 0
     manifest = json.loads((next(tmp_path.iterdir()) / "manifest.json").read_text())
-    assert seen == [False]
+    assert seen == [("off", "openems")]
     assert manifest["outputs"]["ports"] == ["port1_s11.csv"]
     assert "nf2ff" not in manifest["outputs"]
+
+
+def test_run_forwards_palace_backend(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(ir, output_dir, *, farfield=True, backend="openems"):
+        seen.append(backend)
+        csv_path = output_dir / "port1_s11.csv"
+        csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+
+    monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--backend", "palace"]) == 0
+    assert seen == ["palace"]
+
+
+def test_run_forwards_meep_backend(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(ir, output_dir, *, farfield=True, backend="openems"):
+        seen.append(backend)
+        csv_path = output_dir / "port1_s11.csv"
+        csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+
+    monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--backend", "meep"]) == 0
+    assert seen == ["meep"]
+
+
+def test_compile_meep_writes_json(tmp_path):
+    output = tmp_path / "yagi.meep.json"
+    assert main(["compile", "examples/yagi.jaam", "--backend", "meep", "-o", str(output)]) == 0
+    text = output.read_text()
+    assert '"cylinders"' in text
+    assert '"component": "y"' in text
+
+
+def test_run_forwards_scuff_backend(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(ir, output_dir, *, farfield=True, backend="openems"):
+        seen.append(backend)
+        csv_path = output_dir / "port1_s11.csv"
+        csv_path.write_text("frequency_hz,s11_db\n1,-10\n")
+        return RunResult((csv_path,), (-10.0,), (1.0,), 0.25)
+
+    monkeypatch.setattr("jaam.cli.run_simulation", fake_run)
+    monkeypatch.setattr("jaam.cli.ContainerEngine.image_exists", lambda self, image=None: False)
+    assert main(["run", "examples/yagi.jaam", "--output-dir", str(tmp_path), "--backend", "scuff"]) == 0
+    assert seen == ["scuff"]
+
+
+def test_compile_scuff_writes_json(tmp_path):
+    output = tmp_path / "yagi.scuff.json"
+    assert main(["compile", "examples/yagi.jaam", "--backend", "scuff", "-o", str(output)]) == 0
+    assert "driven__a" in output.read_text()
+
+
+def test_compile_palace_writes_json(tmp_path):
+    output = tmp_path / "yagi.json"
+    assert main(["compile", "examples/yagi.jaam", "--backend", "palace", "-o", str(output)]) == 0
+    text = output.read_text()
+    assert '"Type": "Driven"' in text
+    assert "LumpedPort" in text
 
 
 def test_container_is_used_only_if_native_solver_is_unavailable(monkeypatch, tmp_path):

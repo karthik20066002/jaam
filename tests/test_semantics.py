@@ -29,6 +29,51 @@ def test_semantic_pass_trace_is_ordered_and_measured():
     assert entries[-1][2]["mesh_cells"] > 0
 
 
+def test_helix_fdtd_cells_are_not_millions() -> None:
+    ir = compile_file(Path("examples/helix.jaam"))
+    cells = (len(ir.mesh.lines_x) - 1) * (len(ir.mesh.lines_y) - 1) * (len(ir.mesh.lines_z) - 1)
+    points = sum(len(op.points) for op in ir.geometry if hasattr(op, "points"))
+    assert 50 <= points <= 140
+    assert cells < 400_000
+    radius = 0.0015
+    stem_x = 0.0195
+    assert any(abs(line - (stem_x - radius)) < 1e-9 for line in ir.mesh.lines_x)
+    assert any(abs(line - (stem_x + radius)) < 1e-9 for line in ir.mesh.lines_x)
+
+
+def test_yagi_feed_port_sits_inside_metal_gap() -> None:
+    ir = compile_file(Path("examples/yagi.jaam"))
+    fed = next(op for op in ir.geometry if getattr(op, "feed", None) is not None)
+    other = next(op for op in ir.geometry if op.name.startswith("driven__") and op is not fed)
+    feed = fed.feed
+    assert feed is not None
+    metal_lo = min(fed.points[-1][1], other.points[0][1])
+    metal_hi = max(fed.points[-1][1], other.points[0][1])
+    port_lo = min(feed.start[1], feed.stop[1])
+    port_hi = max(feed.start[1], feed.stop[1])
+    assert metal_lo < port_lo - 1e-9
+    assert port_hi < metal_hi - 1e-9
+
+
+def test_yagi_mesh_resolves_declared_radius() -> None:
+    ir = compile_file(Path("examples/yagi.jaam"))
+    radius = 0.0015
+    for value in (-radius, -radius / 2, radius / 2, radius):
+        assert any(abs(line - value) < 1e-9 for line in ir.mesh.lines_z)
+
+
+def test_helix_example_compiles():
+    ir = compile_file(Path("examples/helix.jaam"))
+    assert ir.frequency.single_hz == 2.45e9
+    wires = [op for op in ir.geometry if hasattr(op, "points")]
+    assert any(op.feed is not None for op in wires)
+    assert sum(len(op.points) for op in wires) > 24
+    xs = [p[0] for op in wires for p in op.points]
+    zs = [p[2] for op in wires for p in op.points]
+    assert max(xs) - min(xs) > 0.03
+    assert max(zs) - min(zs) > 0.1
+
+
 def test_canonical_yagi_compiles():
     ir = compile_file(Path("examples/yagi.jaam"))
     assert ir.frequency.single_hz == 2.45e9
@@ -48,6 +93,13 @@ def test_compilation_result_links_lowered_geometry_to_source():
     assert result.duration_ns >= 0
     assert result.source_map["driven__a"].line == 13
     assert result.source_map["driven__b"].line == 13
+
+
+def test_scuff_compile_skips_fdtd_mesh_passes() -> None:
+    scuff = compile_file_result(Path("examples/yagi.jaam"), backend="scuff")
+    openems = compile_file_result(Path("examples/yagi.jaam"), backend="openems")
+    assert "graded-mesh-coarsening" not in {item.name for item in scuff.passes}
+    assert "graded-mesh-coarsening" in {item.name for item in openems.passes}
 
 
 def test_thick_wire_and_unit_conversion():

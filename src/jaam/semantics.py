@@ -147,7 +147,8 @@ class _Analyzer:
                 feed = self._make_feed(source, wavelength) if source.impedance is not None else None
                 cls = CurveOp if source.radius / wavelength < 0.02 else WireOp
                 if feed:
-                    left, right = self._split_path(source.points, feed.start, feed.stop)
+                    metal_start, metal_stop = self._metal_gap_ends(source, wavelength, feed)
+                    left, right = self._split_path(source.points, metal_start, metal_stop)
                     geometry.append(cls(f"{source.name}__a", left, source.material, source.radius, feed))
                     geometry.append(cls(f"{source.name}__b", right, source.material, source.radius, None))
                 else:
@@ -384,7 +385,13 @@ class _Analyzer:
             if not radius or pitch is None or not turns or radius <= 0 or turns <= 0:
                 self.error("J161", "helix radius and turns must be positive", expr.span)
                 return None
-            count = max(24, math.ceil(turns * 32), math.ceil((2 * math.pi * radius * turns) / (wavelength / 50)))
+            from .mesh_features import path_sample_count
+
+            count = path_sample_count(
+                arc_length=2 * math.pi * radius * turns,
+                wavelength=wavelength,
+                turns=turns,
+            )
             return tuple(
                 (radius * math.cos(2 * math.pi * turns * i / count), radius * math.sin(2 * math.pi * turns * i / count), pitch * turns * i / count)
                 for i in range(count + 1)
@@ -396,7 +403,13 @@ class _Analyzer:
             stop = self._number(values.get("end_angle"), "angle")
             if radius is None or start is None or stop is None or radius <= 0:
                 return None
-            count = max(8, math.ceil(abs(stop - start) * 16 / math.pi), math.ceil(abs(stop - start) * radius / (wavelength / 50)))
+            from .mesh_features import path_sample_count
+
+            count = path_sample_count(
+                arc_length=abs(stop - start) * radius,
+                wavelength=wavelength,
+                angle_rad=stop - start,
+            )
             return tuple((radius * math.cos(start + (stop - start) * i / count), radius * math.sin(start + (stop - start) * i / count), 0.0) for i in range(count + 1))
         if expr.name == "parabolic_arc":
             values = self._bind(fake, ("focal_length", "aperture"), required=("focal_length", "aperture"))
@@ -405,7 +418,9 @@ class _Analyzer:
             if not focal or not aperture or focal <= 0 or aperture <= 0:
                 self.error("J162", "parabolic focal length and aperture must be positive", expr.span)
                 return None
-            count = max(32, math.ceil(aperture / (wavelength / 50)))
+            from .mesh_features import path_sample_count
+
+            count = path_sample_count(arc_length=aperture, wavelength=wavelength)
             return tuple((((-aperture / 2 + aperture * i / count) ** 2) / (4 * focal), -aperture / 2 + aperture * i / count, 0.0) for i in range(count + 1))
         if expr.name == "curve":
             self.error("J163", "curve() is reserved and not supported in v1", expr.span)
@@ -498,11 +513,22 @@ class _Analyzer:
                 tangent = tuple((b[i] - a[i]) / length for i in range(3))
                 break
             traversed += length
-        gap = min(max(2 * source.radius, wavelength / 1000), total / 10)
-        start = tuple(midpoint[i] - tangent[i] * gap / 2 for i in range(3))
-        stop = tuple(midpoint[i] + tangent[i] * gap / 2 for i in range(3))
+        metal_gap = min(max(2 * source.radius, wavelength / 1000), total / 10)
+        port_gap = metal_gap / 3.0
+        start = tuple(midpoint[i] - tangent[i] * port_gap / 2 for i in range(3))
+        stop = tuple(midpoint[i] + tangent[i] * port_gap / 2 for i in range(3))
         direction = "xyz"[max(range(3), key=lambda i: abs(tangent[i]))]
         return FeedSpec(source.impedance or 50.0, start, stop, direction)
+
+    def _metal_gap_ends(self, source: _WireSource, wavelength: float, feed: FeedSpec) -> tuple[Point3, Point3]:
+        total = self._path_length(source.points)
+        metal_gap = min(max(2 * source.radius, wavelength / 1000), total / 10)
+        midpoint = tuple((feed.start[i] + feed.stop[i]) / 2 for i in range(3))
+        span = math.dist(feed.start, feed.stop)
+        tangent = tuple((feed.stop[i] - feed.start[i]) / span for i in range(3))
+        start = tuple(midpoint[i] - tangent[i] * metal_gap / 2 for i in range(3))
+        stop = tuple(midpoint[i] + tangent[i] * metal_gap / 2 for i in range(3))
+        return start, stop
 
     def _domain(self, geometry: list[GeometryOp], wavelength: float, boundary: str):
         points: list[Point3] = []
@@ -528,21 +554,13 @@ class _Analyzer:
 
     def _mesh(self, geometry: Sequence[GeometryOp], lo: Point3, hi: Point3, wavelength: float) -> MeshSpec:
         max_res = wavelength / 20
-        axes: list[set[float]] = [{lo[i], hi[i]} for i in range(3)]
+        from .mesh_features import fdtd_feature_axes
+
+        sampled = fdtd_feature_axes(geometry, wavelength)
+        axes: list[set[float]] = [{lo[i], hi[i], *sampled[i]} for i in range(3)]
         for op in geometry:
-            if isinstance(op, (CurveOp, WireOp)):
-                for point in op.points:
-                    for i in range(3):
-                        axes[i].add(point[i])
-                if isinstance(op, WireOp):
-                    for point in op.points:
-                        for i in range(3):
-                            axes[i].update((point[i] - op.radius_m, point[i] + op.radius_m))
-                if op.feed:
-                    for point in (op.feed.start, op.feed.stop):
-                        for i in range(3):
-                            axes[i].add(point[i])
-                    self._refine_feed_gap(axes, op.feed)
+            if isinstance(op, (CurveOp, WireOp)) and op.feed:
+                self._refine_feed_gap(axes, op.feed)
             elif isinstance(op, BoxOp):
                 for i in range(3):
                     edge_lo, edge_hi = op.start[i], op.stop[i]

@@ -8,6 +8,7 @@ import subprocess
 import time
 
 SOLVER_IMAGE = "localhost/jaam-openems:7706743cc33f"
+PALACE_IMAGE = "localhost/jaam-palace:0.16"
 
 
 class ContainerUnavailableError(RuntimeError):
@@ -71,7 +72,7 @@ class ContainerEngine:
         ]
 
     def solve_command(self, artifact_dir: Path, script: str = "generated.py") -> list[str]:
-        """Build the podman run command to execute generated.py inside the solver container."""
+        """Build the podman run command to execute generated.py inside the openEMS container."""
         return [
             self.executable,
             "run",
@@ -82,6 +83,23 @@ class ContainerEngine:
             SOLVER_IMAGE,
             "/opt/openEMS/venv/bin/python3",
             f"/work/{script}",
+        ]
+
+    def palace_command(self, artifact_dir: Path, image: str = PALACE_IMAGE) -> list[str]:
+        """Run Palace on a prepared artifact directory (mesh.msh + palace.json)."""
+        artifact_dir = artifact_dir.resolve()
+        return [
+            self.executable,
+            "run",
+            "--rm",
+            "--network=none",
+            "-v",
+            f"{artifact_dir}:/work:Z",
+            "-w",
+            "/work",
+            image,
+            "--serial",
+            "palace.json",
         ]
 
     def run(self, artifact_dir: Path, script: str = "generated.py") -> ContainerRunResult:
