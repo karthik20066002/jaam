@@ -253,10 +253,11 @@ def write_scuff_inputs(ir: SimulationIR, directory: Path, *, stem: str = "model"
     mate = next((obj for obj in objects if obj["name"] == mate_name), None)
     if mate is None:
         raise RuntimeError(f"fed wire {fed.name} has no complementary half")
-    # The port polygons must lie ON the open tube rims (the metal-gap ends),
-    # not on the feed faces: lowering leaves a metal gap several times wider
-    # than the port gap (see semantics._metal_gap_ends), so polygons placed
-    # at feed.start/stop float in empty mesh and scuff-rf finds 0 edges.
+    # The port polygons must lie ON the open tube rims (the metal-gap ends).
+    # These now coincide with feed.start/feed.stop (see semantics._make_feed),
+    # but rim_nearest is kept as a defensive lookup against the actual sampled
+    # mesh rather than trusting that coincidence, since a mismatch here means
+    # the polygons float in empty mesh and scuff-rf finds 0 edges.
     feed_mid = tuple((feed.start[i] + feed.stop[i]) / 2 for i in range(3))
 
     def rim_nearest(points_mm: list[Point3], ref: Point3) -> Point3:

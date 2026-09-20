@@ -147,8 +147,7 @@ class _Analyzer:
                 feed = self._make_feed(source, wavelength) if source.impedance is not None else None
                 cls = CurveOp if source.radius / wavelength < 0.02 else WireOp
                 if feed:
-                    metal_start, metal_stop = self._metal_gap_ends(source, wavelength, feed)
-                    left, right = self._split_path(source.points, metal_start, metal_stop)
+                    left, right = self._split_path(source.points, feed.start, feed.stop)
                     geometry.append(cls(f"{source.name}__a", left, source.material, source.radius, feed))
                     geometry.append(cls(f"{source.name}__b", right, source.material, source.radius, None))
                 else:
@@ -513,22 +512,19 @@ class _Analyzer:
                 tangent = tuple((b[i] - a[i]) / length for i in range(3))
                 break
             traversed += length
+        # The port must span the *entire* conductor gap: anything narrower
+        # leaves a physically disconnected sliver of free space between the
+        # port terminals and the actual wire ends on each side (the port
+        # excites nothing but its own capacitance to two nearby, unconnected
+        # stubs). That produced a near-total-mismatch, huge-reactance result
+        # on both openEMS and Meep -- confirmed against SCUFF-EM, which
+        # places its port directly on the conductor rim and sees a normal
+        # resonance on the identical geometry.
         metal_gap = min(max(2 * source.radius, wavelength / 1000), total / 10)
-        port_gap = metal_gap / 3.0
-        start = tuple(midpoint[i] - tangent[i] * port_gap / 2 for i in range(3))
-        stop = tuple(midpoint[i] + tangent[i] * port_gap / 2 for i in range(3))
-        direction = "xyz"[max(range(3), key=lambda i: abs(tangent[i]))]
-        return FeedSpec(source.impedance or 50.0, start, stop, direction)
-
-    def _metal_gap_ends(self, source: _WireSource, wavelength: float, feed: FeedSpec) -> tuple[Point3, Point3]:
-        total = self._path_length(source.points)
-        metal_gap = min(max(2 * source.radius, wavelength / 1000), total / 10)
-        midpoint = tuple((feed.start[i] + feed.stop[i]) / 2 for i in range(3))
-        span = math.dist(feed.start, feed.stop)
-        tangent = tuple((feed.stop[i] - feed.start[i]) / span for i in range(3))
         start = tuple(midpoint[i] - tangent[i] * metal_gap / 2 for i in range(3))
         stop = tuple(midpoint[i] + tangent[i] * metal_gap / 2 for i in range(3))
-        return start, stop
+        direction = "xyz"[max(range(3), key=lambda i: abs(tangent[i]))]
+        return FeedSpec(source.impedance or 50.0, start, stop, direction)
 
     def _domain(self, geometry: list[GeometryOp], wavelength: float, boundary: str):
         points: list[Point3] = []

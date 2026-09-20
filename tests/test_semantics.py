@@ -41,7 +41,18 @@ def test_helix_fdtd_cells_are_not_millions() -> None:
     assert any(abs(line - (stem_x + radius)) < 1e-9 for line in ir.mesh.lines_x)
 
 
-def test_yagi_feed_port_sits_inside_metal_gap() -> None:
+def test_yagi_feed_port_spans_the_full_metal_gap() -> None:
+    """Regression: the port must touch both conductor ends, not float in a
+    narrower sub-segment centered inside the metal gap.
+
+    A port narrower than the metal gap leaves a physically disconnected
+    sliver of free space between the port terminals and the actual wire
+    ends on each side -- the port excites nothing but its own capacitance
+    to two nearby, unconnected stubs. Confirmed against SCUFF-EM (whose
+    port sits directly on the conductor rim): the narrower port produced a
+    near-total-mismatch, huge-reactance result on both openEMS and Meep for
+    the identical geometry.
+    """
     ir = compile_file(Path("examples/yagi.jaam"))
     fed = next(op for op in ir.geometry if getattr(op, "feed", None) is not None)
     other = next(op for op in ir.geometry if op.name.startswith("driven__") and op is not fed)
@@ -51,8 +62,8 @@ def test_yagi_feed_port_sits_inside_metal_gap() -> None:
     metal_hi = max(fed.points[-1][1], other.points[0][1])
     port_lo = min(feed.start[1], feed.stop[1])
     port_hi = max(feed.start[1], feed.stop[1])
-    assert metal_lo < port_lo - 1e-9
-    assert port_hi < metal_hi - 1e-9
+    assert abs(metal_lo - port_lo) < 1e-9
+    assert abs(metal_hi - port_hi) < 1e-9
 
 
 def test_yagi_mesh_resolves_declared_radius() -> None:

@@ -74,7 +74,7 @@ def _add_wire_features(
             axes[i].add(point[i])
         # Any point within one wire-radius of a feed anchor already sits
         # inside that feed's dedicated gap-refinement region (see
-        # semantics._refine_feed_gap / _metal_gap_ends), on this op or its
+        # semantics._refine_feed_gap / _make_feed), on this op or its
         # split sibling. Padding it by ±radius here plants lines that
         # interleave with the feed's own fine mesh, sometimes microns apart,
         # collapsing the FDTD timestep for the whole domain for no accuracy

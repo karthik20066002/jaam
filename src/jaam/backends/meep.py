@@ -13,7 +13,7 @@ from typing import Any
 from jaam.farfield import write_farfield_vtp, write_nf2ff_csv
 from jaam.ir import BoxOp, CurveOp, FeedSpec, Point3, RotPolyOp, SimulationIR, WireOp
 
-from .common import NativeDependencyError, RunResult
+from .common import NativeDependencyError, RunResult, farfield_mode
 
 _C0 = 299_792_458.0
 _ETA0 = 376.730313461
@@ -49,15 +49,23 @@ def meep_fwidth(ir: SimulationIR) -> float:
 
 
 def meep_resolution(ir: SimulationIR) -> float:
+    """Yee-grid resolution in cells per metre.
+
+    Driven by wavelength alone (lambda/20, matching the openEMS and SCUFF-EM
+    backends' own convention), not by wire radius. A "cells across the wire
+    diameter" requirement sounds reasonable in isolation, but Meep applies
+    one resolution to the *entire* domain: for a millimetre-scale wire radius
+    in a decimetre-scale radiating domain, even a mild "4 cells across the
+    diameter" target inflates total cell count by 1e4-1e7x, past what any
+    realistic host can hold (the previous formula demanded ~2.7 billion
+    cells / ~130GB for examples/dipole.jaam alone). Meep represents thin
+    sub-cell conductors correctly via subpixel material averaging
+    (eps_averaging, enabled in run_meep) instead: the same technique openEMS
+    uses via AddWire's thin-wire approximation rather than forcing the mesh
+    itself to resolve the physical radius.
+    """
     wavelength = _C0 / ir.frequency.center_hz
-    radii = [
-        op.radius_m
-        for op in ir.geometry
-        if isinstance(op, (CurveOp, WireOp)) and op.radius_m > 0
-    ]
-    by_lambda = 20.0 / wavelength
-    by_wire = 4.0 / (2.0 * min(radii)) if radii else 0.0
-    return max(by_lambda, by_wire)
+    return 20.0 / wavelength
 
 
 def meep_cylinders(ir: SimulationIR) -> list[dict[str, Any]]:
@@ -106,9 +114,25 @@ def _component(mp: Any, direction: str):
     return {"x": mp.Ex, "y": mp.Ey, "z": mp.Ez}[direction]
 
 
-def ampere_loop(center: Point3, direction: str, radius: float) -> list[tuple[Point3, str]]:
+def ampere_loop_half_width(radius: float, resolution: float) -> float:
+    """Half-width of the square Ampere loop, in metres.
+
+    Must span at least a couple of grid cells, not just the wire's own
+    physical radius: at a sub-cell loop size the 4 H-field DFT samples fall
+    within the same Yee cell (or its immediate interpolation neighbourhood),
+    so the circulation integral is dominated by interpolation noise rather
+    than the antenna's actual near-field structure. Confirmed empirically --
+    at a purely radius-based loop, a Yagi's measured |gamma| came out
+    numerically greater than 1, a physical impossibility for a passive
+    reflection coefficient. Bounded well below a wavelength (checked by the
+    caller) so the loop stays in the quasi-static near field.
+    """
+    return max(2.0 * radius, 2.0 / resolution)
+
+
+def ampere_loop(center: Point3, direction: str, radius: float, resolution: float) -> list[tuple[Point3, str]]:
     """Four H samples forming a loop around a feed along `direction`."""
-    a = max(2.0 * radius, 1e-4)
+    a = ampere_loop_half_width(radius, resolution)
     x, y, z = center
     if direction == "x":
         return [
@@ -140,7 +164,7 @@ def _to_cell(point: Point3, origin: Point3) -> Point3:
     return (point[0] - origin[0], point[1] - origin[1], point[2] - origin[2])
 
 
-def run_meep(ir: SimulationIR, output_dir: Path, *, farfield: bool = True) -> RunResult:
+def run_meep(ir: SimulationIR, output_dir: Path, *, farfield: bool | str = True) -> RunResult:
     mp = _require_meep()
     feeds = _feeds(ir)
     if not feeds:
@@ -208,20 +232,27 @@ def run_meep(ir: SimulationIR, output_dir: Path, *, farfield: bool = True) -> Ru
         sources=sources,
         resolution=resolution,
         force_complex_fields=True,
-        eps_averaging=False,
+        # Subpixel averaging (Meep's default) is required, not optional, now
+        # that resolution is wavelength- not wire-radius-driven: a wire much
+        # thinner than a cell needs its material fraction correctly averaged
+        # into that cell, or an un-averaged point-sample test could miss a
+        # sub-cell PEC conductor entirely and simulate an antenna with no
+        # wire in it.
+        eps_averaging=True,
     )
     nfreq = 1 if ir.frequency.single_hz else 21
     dft_e = sim.add_dft_fields([ecomp], fcen, fwidth, nfreq, center=mp.Vector3(*src_center), size=mp.Vector3(*src_size))
     fed, feed = feeds[0]
-    loop = ampere_loop(src_center, feed.direction, fed.radius_m)
+    loop = ampere_loop(src_center, feed.direction, fed.radius_m, resolution)
     hmap = {"hx": mp.Hx, "hy": mp.Hy, "hz": mp.Hz}
     dft_h = [
         sim.add_dft_fields([hmap[name]], fcen, fwidth, nfreq, center=mp.Vector3(*point), size=mp.Vector3())
         for point, name in loop
     ]
-    loop_side = max(4.0 * fed.radius_m, 2e-4)
+    loop_side = 2.0 * ampere_loop_half_width(fed.radius_m, resolution)
+    quality = farfield_mode(farfield)
     n2f = None
-    if farfield:
+    if quality != "off":
         box = tuple(c - 2.0 * dpml for c in cell)
         n2f = sim.add_near2far(
             fcen,
@@ -255,6 +286,16 @@ def run_meep(ir: SimulationIR, output_dir: Path, *, farfield: bool = True) -> Ru
     current = loop_side * (h_samples[0] + h_samples[1] - h_samples[2] - h_samples[3])
     if abs(current) < 1e-30:
         raise RuntimeError("Meep feed current DFT is zero; check the gap source and mesh")
+    log(
+        "port-measurement",
+        eArraySize=list(e_array.shape),
+        eArrayMean=[e_array.mean().real, e_array.mean().imag],
+        voltage=[voltage.real, voltage.imag],
+        hSamples=[[h.real, h.imag] for h in h_samples],
+        current=[current.real, current.imag],
+        loopSide=loop_side,
+        gapM=source["gap_m"],
+    )
     z_in = voltage / current
     gamma = (z_in - source["impedance_ohm"]) / (z_in + source["impedance_ohm"])
     s11_db = 20.0 * math.log10(max(abs(gamma), 1e-300))
@@ -270,7 +311,7 @@ def run_meep(ir: SimulationIR, output_dir: Path, *, farfield: bool = True) -> Ru
         writer.writerow((freq_hz, gamma.real, gamma.imag, s11_db, vswr, z_in.real, z_in.imag))
 
     native_cells = tuple(max(1, int(round(cell[i] * resolution))) for i in range(3))
-    if not farfield or n2f is None:
+    if quality == "off" or n2f is None:
         log("solver-complete", durationSeconds=duration, bestFrequencyHz=freq_hz, farfield=False)
         return RunResult((s11_path,), (s11_db,), (freq_hz,), duration, native_mesh_cells=native_cells)
 

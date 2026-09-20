@@ -12,9 +12,6 @@ source → ANTLR AST → unit-normalized geometry → typed IR → optimization 
        → fresh result artifact → Studio
 ```
 
-> The finale recording will live here after the validated container run is
-> recorded. No precomputed solver result is bundled with this repository.
-
 ## 30-second quick start
 
 ```sh
@@ -97,6 +94,38 @@ planned IR intervals and actual post-smoothing FDTD dimensions, solver timing,
 best-match frequency, minimum S11, peak gain, and
 output filenames.
 
+## Feed connectivity fix
+
+`_make_feed()` built the excitation port as only a third of the gap it cut
+into the conductor (`port_gap = metal_gap / 3.0`), leaving the port
+terminals physically disconnected from both wire ends by a sliver of
+untouched free space on each side (0.667mm per side for the dipole).
+openEMS and Meep both excite exactly `feed.start` -> `feed.stop`, so they
+were driving an open circuit's stray capacitance to two nearby, unconnected
+wire stubs rather than the antenna itself — consistent with the
+"near-total mismatch, thousands of ohms of reactance" every example model
+showed on both backends. A test (`test_yagi_feed_port_sits_inside_metal_gap`)
+explicitly asserted this disconnected geometry with a real numeric margin,
+as if it were intentional. SCUFF-EM alone looked correct, purely because its
+rim-port fix (below) coincidentally relocated its port onto the actual
+conductor ends instead of `feed.start`/`feed.stop`.
+
+Fixed by making the port span the entire metal gap, so the conductor now
+connects directly to the port terminals (`src/jaam/semantics.py`). Measured
+on `--backend openems --no-farfield`:
+
+| Model | Before fix | After fix |
+| --- | --- | --- |
+| Dipole | S11 ~0 dB everywhere; reactance in the thousands of ohms | **-13.5 dB at 976.5 MHz; 75.7 ohm / -6.8 ohm** (a textbook half-wave dipole) |
+| Yagi | S11 ~0 dB | **-3.5 dB** |
+| Helix | S11 ~0 dB | **-2.6 dB** |
+
+SCUFF-EM's numbers are unchanged (dipole -30.6 dB, yagi -4.2 dB, helix
+-1.1 dB), as expected since its port already touched the conductor. The
+remaining gap between openEMS's and SCUFF-EM's numbers reflects a genuine
+difference in numerical method and mesh, not either one being disconnected
+from the antenna it's simulating.
+
 ## Optimization evidence
 
 openEMS runs on one global FDTD timestep, bound by the single smallest cell
@@ -167,16 +196,15 @@ before vs after the coarsening fix, port-only, same frequency grid:
 | Helix | 5.4e-7 | 4.4e-6 dB |
 
 All three are negligible. Note: the naive impedance-relative-delta check
-(`scripts/compare_dipole_reference.py`'s own ≤1% threshold) reports a
-misleading 22–23% "delta" for dipole and yagi here — both sit at
-near-total mismatch (|Γ| ≈ 0.9998, S11 ≈ 0 dB) across their whole configured
-band on openEMS, so `Z = Z0·(1+Γ)/(1-Γ)` has a near-zero denominator and
-amplifies a tiny Γ change into a large relative swing. This is a pre-existing
-property of these two example models on openEMS (present before any change
-made this session), not something introduced by the fixes above — compare
-against SCUFF-EM below, which sees real resonance dips on the identical
-geometry. Use Γ or S11-dB deltas, not the impedance ratio, when either
-example antenna is this poorly matched.
+(`scripts/compare_dipole_reference.py`'s own ≤1% threshold) reported a
+misleading 22–23% "delta" for dipole and yagi when these measurements were
+taken, because `Z = Z0·(1+Γ)/(1-Γ)` has a near-zero denominator whenever
+|Γ| is close to 1 and amplifies a tiny Γ change into a large relative swing.
+At the time both models sat at genuine near-total mismatch on openEMS for
+an unrelated reason — see Feed connectivity fix below, now resolved — so
+this was real, not a measurement artifact of the coarsening fix itself.
+Use Γ or S11-dB deltas, not the impedance ratio, whenever |Γ| is closer to
+1 than to 0.
 
 **SCUFF-EM** (`--backend scuff`, unaffected by the openEMS-specific fixes
 above, since it builds its own BEM surface mesh directly from geometry and
@@ -263,11 +291,7 @@ Podman and can generate equivalent Docker commands.
 - Container execution is connected to `jaam run`. When a built
   `localhost/jaam-openems:7706743cc33f` image is present, runs use the
   container; otherwise host bindings are used.
-- The example dipole and Yagi both show near-total mismatch on openEMS
-  (|Γ| ≈ 0.9998, S11 ≈ 0 dB) across their whole configured band, while
-  SCUFF-EM sees real resonance dips on the identical geometry (see
-  Optimization evidence). This predates this session's changes and wasn't
-  investigated here — worth a separate look at the openEMS lumped-port setup.
+- The system still has no GPU acceleration, due to the bindings being CPU only.
 
 Run `python3 benchmarks/dipole_reference.py` and then
 `PYTHONPATH=src python3 scripts/compare_dipole_reference.py JAAM_ARTIFACT REFERENCE_ARTIFACT`
