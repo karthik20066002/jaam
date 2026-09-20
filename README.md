@@ -273,7 +273,9 @@ Run the suite with `./scripts/uv run --extra studio pytest`.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs ruff (`E4,E7,E9,F`, see `[tool.ruff]` in
-`pyproject.toml`), the full pytest suite with all extras, then builds a
+`pyproject.toml`), the full pytest suite with all extras under `xvfb` (VTK's
+offscreen window still needs an X server for its GLX context; Mesa llvmpipe
+does software rasterization), then builds a
 self-contained Linux `jaam` CLI binary with PyInstaller and smoke-tests it
 with `jaam check examples/dipole.jaam`. Every build uploads the binary as a
 CI artifact; pushing a tag additionally attaches it to a GitHub release.
